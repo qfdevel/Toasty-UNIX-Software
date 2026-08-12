@@ -1,9 +1,10 @@
 /*
- * commands.c - built-in tsh commands
+ * commands.c - core tsh commands and dispatch
  *
  * Each command is a plain function `int fn(int argc, char **argv)`
  * with argv[0] being the command name itself, exactly like a UNIX
- * shell. New commands are added by appending an entry to g_commands.
+ * shell. The core commands live here; the file-system commands live
+ * in cmd_fs.c (g_fs_commands) and are reached through the same table.
  */
 
 #include "commands.h"
@@ -11,21 +12,16 @@
 #include "tsh.h"
 #include "arch/x86_64/cpu.h"
 #include "arch/x86_64/io.h"
-#include "../core/bootinfo.h"
+#include "core/bootinfo.h"
 #include "core/console.h"
 #include "core/klib.h"
 #include "drivers/fb.h"
+#include "drivers/pit.h"
+#include "mm/pmm.h"
 
 #define MAX_ARGS 16
 
-struct command {
-    const char *name;        /* what the user types */
-    const char *description; /* shown by `help` */
-    int (*run)(int argc, char **argv);
-};
-
 static int cmd_help(int argc, char **argv);
-static int cmd_echo(int argc, char **argv);
 static int cmd_clear(int argc, char **argv);
 static int cmd_ver(int argc, char **argv);
 static int cmd_about(int argc, char **argv);
@@ -33,9 +29,8 @@ static int cmd_sysinfo(int argc, char **argv);
 static int cmd_reboot(int argc, char **argv);
 static int cmd_crash(int argc, char **argv);
 
-static const struct command g_commands[] = {
+static const struct shell_command g_core_commands[] = {
     { "help",    "list available commands",      cmd_help },
-    { "echo",    "print its arguments",          cmd_echo },
     { "clear",   "clear the screen",             cmd_clear },
     { "ver",     "show the kernel version",      cmd_ver },
     { "about",   "show TUS information",         cmd_about },
@@ -44,26 +39,20 @@ static const struct command g_commands[] = {
     { "crash",   "raise a CPU exception (demo)", cmd_crash },
 };
 
-#define COMMAND_COUNT (sizeof(g_commands) / sizeof(g_commands[0]))
+#define CORE_COMMAND_COUNT (sizeof(g_core_commands) / sizeof(g_core_commands[0]))
 
 static int cmd_help(int argc, char **argv) {
     (void)argc;
     (void)argv;
     console_write("Available commands:\n");
-    for (size_t i = 0; i < COMMAND_COUNT; i++) {
-        kprintf("  %-10s %s\n", g_commands[i].name, g_commands[i].description);
+    for (size_t i = 0; i < CORE_COMMAND_COUNT; i++) {
+        kprintf("  %-10s %s\n", g_core_commands[i].name,
+                g_core_commands[i].description);
     }
-    return 0;
-}
-
-static int cmd_echo(int argc, char **argv) {
-    for (int i = 1; i < argc; i++) {
-        if (i > 1) {
-            console_putchar(' ');
-        }
-        console_write(argv[i]);
+    for (size_t i = 0; i < g_fs_command_count; i++) {
+        kprintf("  %-10s %s\n", g_fs_commands[i].name,
+                g_fs_commands[i].description);
     }
-    console_putchar('\n');
     return 0;
 }
 
@@ -77,7 +66,7 @@ static int cmd_clear(int argc, char **argv) {
 static int cmd_ver(int argc, char **argv) {
     (void)argc;
     (void)argv;
-    kprintf("TUS kernel 0.1.0, built with %s\n", __VERSION__);
+    kprintf("TUS kernel 0.2.0, built with %s\n", __VERSION__);
     return 0;
 }
 
@@ -106,6 +95,16 @@ static int cmd_sysinfo(int argc, char **argv) {
 
     kprintf("Memory      : %llu MiB usable\n",
             (unsigned long long)(g_bootinfo.usable_memory_bytes / (1024 * 1024)));
+
+    uint64_t total_frames = 0, free_frames = 0;
+    pmm_get_stats(&total_frames, &free_frames);
+    kprintf("PMM         : %llu free / %llu frames (%llu MiB)\n",
+            (unsigned long long)free_frames, (unsigned long long)total_frames,
+            (unsigned long long)(free_frames * 4 / 1024));
+
+    kprintf("Uptime      : %llu.%03llu s\n",
+            (unsigned long long)(pit_uptime_ms() / 1000),
+            (unsigned long long)(pit_uptime_ms() % 1000));
 
     uint32_t width = 0, height = 0, bpp = 0;
     uint64_t pitch = 0;
@@ -181,9 +180,15 @@ void command_execute(const char *line) {
         return; /* empty line */
     }
 
-    for (size_t i = 0; i < COMMAND_COUNT; i++) {
-        if (strcmp(argv[0], g_commands[i].name) == 0) {
-            g_commands[i].run(argc, argv);
+    for (size_t i = 0; i < CORE_COMMAND_COUNT; i++) {
+        if (strcmp(argv[0], g_core_commands[i].name) == 0) {
+            g_core_commands[i].run(argc, argv);
+            return;
+        }
+    }
+    for (size_t i = 0; i < g_fs_command_count; i++) {
+        if (strcmp(argv[0], g_fs_commands[i].name) == 0) {
+            g_fs_commands[i].run(argc, argv);
             return;
         }
     }

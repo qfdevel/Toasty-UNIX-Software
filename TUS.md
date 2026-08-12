@@ -81,24 +81,67 @@ SERIAL: yes
 - Limine maps the kernel ELF at its linked higher-half addresses, sets
   up a stack (≥16 KiB), and fills in every `.requests` struct.
 
-## 4. Kernel state (v0.1.0 — working, 2026-08-12)
+## 4. Kernel state (v0.2.0 — working, 2026-08-13)
+
+v0.2.0 adds the Phase 2 milestone: memory management, timing, the
+virtual file system with device nodes, and a POSIX-style syscall ABI
+that tsh itself uses. All of it is verified by `make test` (16/16
+automated checks).
+
+### 4.1 Phase 2 components
+
+- **PMM** (`kernel/mm/pmm.c`): bitmap frame allocator over the Limine
+  memory map. Only `LIMINE_MEMMAP_USABLE` frames are allocated; the
+  kernel/modules and framebuffer regions are excluded by the
+  bootloader. First-fit with a hint, `pmm_alloc_frame(s)`, free,
+  phys→virt, stats. Boot: 130591 frames (510 MiB usable), ~2 used.
+- **VMM** (`kernel/mm/vmm.c`): extends Limine's own page tables
+  (read CR3, allocate PDPT/PD/PT from the PMM on demand) instead of
+  replacing them — safe early design. `vmm_map_page`/`map_region`/
+  `unmap_page` + `invlpg`.
+- **kmalloc** (`kernel/mm/kmalloc.c`): free-list heap at
+  `KHEAP_BASE = 0xffffffff81000000` (64 MiB cap), split/coalesce,
+  `krealloc`. The heap grows by mapping fresh frames from the PMM.
+- **PIT** (`kernel/drivers/pit.c`): IRQ0 at 100 Hz (divisor 11932,
+  mode 3), `pit_uptime_ms()` and `timer_sleep_ms()` (hlt loop). The
+  timer API is designed so an APIC timer can replace it later.
+- **VFS** (`kernel/vfs/vfs.c`): ramfs tree (`/`, `dev/`, `tmp/`,
+  `boot/`, `etc/motd`), fd table (16 slots, 0/1/2 pre-opened on
+  `/dev/tty0`), open/read/write/close/ioctl/readdir/mkdir/unlink.
+- **Devices** (`kernel/vfs/devices.c`): `/dev/fb0` (raw pixel
+  read/write by byte offset + `FB_IOCTL_GET_INFO`/`FB_IOCTL_FILL`),
+  `/dev/tty0` (write→console, read→keyboard, ESC=EOF), `/dev/kbd0`,
+  `/dev/serial0` (write-only), `/dev/null`, `/dev/zero`.
+- **Syscalls** (`kernel/syscall/syscall.c`): `int $0x80` trap gate
+  (DPL 3, vector 0x80). Numbers: exit 0, read 1, write 2, open 3,
+  close 4, ioctl 5, getpid 6, uptime 7, sleep 8, mkdir 9, unlink 10,
+  readdir 11. Errors are negative errno (ENOENT=2, EINVAL=22, …).
+  Ring-0 for now; ring-3 enforcement comes with userspace.
+- **tsh additions**: `ls`, `cat`, `echo` (with `> file`
+  redirection), `mkdir`, `touch`, `rm`, `uptime`, `sleep`,
+  `fbfill <hexcolor>`; `sysinfo` now shows PMM stats + uptime. All
+  file commands go through the syscall ABI (dogfooding).
+
+Verified session (serial log):
+
+```
+tus> cat /etc/motd
+Welcome to TUS - Toasty Unix Software.
+"Work everywhere, but work right."
+tus> echo hello world > /tmp/greet
+tus> cat /tmp/greet
+hello world
+tus> uptime
+uptime: 15.920 s
+tus> fbfill 336699
+fb0: filled with #336699
+```
+
+## 4a. Kernel state (v0.1.0 — archived 2026-08-12)
 
 Boots from the ISO in QEMU (BIOS), serial + framebuffer console,
 interrupt-driven PS/2 keyboard, and an interactive `tsh`. Verified by
-`make test` (10/10 automated checks) and a manual session:
-
-```
-TUS> about
-Toasty Unix Software (TUS)
-"Work everywhere, but work right."
-Architecture: x86_64 (AMD64)
-Bootloader  : Limine 12.5.2
-TUS> sysinfo
-CPU vendor  : AuthenticAMD
-CPU model   : QEMU Virtual CPU version 2.5+
-Memory      : 510 MiB usable
-Framebuffer : 1280x800, 32 bpp, pitch 5120 @ 0xffff8000fd000000
-```
+`make test` (10/10 automated checks).
 
 ## 5. Hard-won lessons (read before touching the kernel)
 
@@ -120,6 +163,23 @@ Framebuffer : 1280x800, 32 bpp, pitch 5120 @ 0xffff8000fd000000
    (`KEEP(*(.requests))`); base revision is found via the symbol
    `limine_base_revision`, declared as
    `static volatile uint64_t limine_base_revision[3] = LIMINE_BASE_REVISION(2);`.
+7. **syscall wrapper must use GCC register variables (Linux pattern),
+   not plain operands.** The kernel stub never restores the argument
+   registers (only RAX comes back). With `"D"/"S"/"d"` operands GCC
+   assumes the asm preserves RSI/RDX and will NOT reload them between
+   calls — the second `read()` in a loop silently gets a garbage
+   buffer. Fix: `register long rdi asm("rdi") = a1;` … and pass them
+   as read-write (`"+r"`) operands, so GCC knows they are clobbered
+   and reloads before every call. Don't push/pop inside the asm
+   either: it shifts GCC's `(%rsp)`-based memory operands.
+8. **The Makefile does not track header dependencies** (no `-MMD`).
+   After editing a header, `make clean` first or you will test a
+   stale binary and chase ghosts.
+9. **`path_split` must not copy a leading slash into the name**: the
+   tree stores `"dev"`, lookup compares `"dev"`. Storing `"/dev"`
+   makes `ls /` show `/dev` but `ls /dev` fail with ENOENT.
+10. **`devices_init()` must run before `vfs_init` pre-opens fd 0/1/2**
+    on `/dev/tty0`, or the standard descriptors stay NULL.
 
 ## 6. Toolchain Status (verified 2026-08-12)
 
@@ -209,10 +269,14 @@ Design principles:
 | 4 | PS/2 keyboard driver (IRQ1, Shift/Caps/Ctrl) | ✅ done |
 | 5 | **tsh** — TUS shell with 8 built-in commands | ✅ done |
 | 6 | Automated test suite (tests/test_boot.py, 10/10) | ✅ done |
-| 7 | Physical memory manager + higher-half paging | ⏳ |
-| 8 | PIT timer, scheduler | ⏳ |
-| 9 | VFS + `/dev/fb0` framebuffer device | ⏳ |
-| 10 | Userspace: init, userspace tsh | ⏳ |
+| 7 | Physical memory manager + higher-half paging | ✅ done (v0.2.0) |
+| 8 | PIT timer (100 Hz, uptime, sleep) | ✅ done (v0.2.0) |
+| 9 | VFS + device nodes (`/dev/fb0`, tty0, kbd0, serial0, null, zero) | ✅ done (v0.2.0) |
+| 10 | POSIX syscall ABI (int $0x80, 12 syscalls, dogfooded by tsh) | ✅ done (v0.2.0) |
+| 11 | Automated test suite extended (16/16) | ✅ done (v0.2.0) |
+| 12 | Userspace: init, userspace tsh | ⏳ |
+| 13 | Scheduler + ring-3 enforcement of syscalls | ⏳ |
+| 14 | Physical disk driver + real filesystem | ⏳ |
 | ... | (expand as we go) | |
 
 ---

@@ -74,6 +74,77 @@ int strncmp(const char *a, const char *b, size_t n) {
     return (int)(unsigned char)*a - (int)(unsigned char)*b;
 }
 
+char *strcpy(char *dest, const char *src) {
+    char *d = dest;
+    while ((*d++ = *src++) != '\0') {
+    }
+    return dest;
+}
+
+char *strncpy(char *dest, const char *src, size_t n) {
+    size_t i = 0;
+    for (; i < n && src[i] != '\0'; i++) {
+        dest[i] = src[i];
+    }
+    for (; i < n; i++) {
+        dest[i] = '\0';
+    }
+    return dest;
+}
+
+char *strchr(const char *s, int c) {
+    char ch = (char)c;
+    for (; *s != '\0'; s++) {
+        if (*s == ch) {
+            return (char *)s;
+        }
+    }
+    return (ch == '\0') ? (char *)s : NULL;
+}
+
+unsigned long strtoul(const char *s, char **end, int base) {
+    const char *p = s;
+    unsigned long value = 0;
+
+    while (*p == ' ' || *p == '\t') {
+        p++;
+    }
+    if (base == 0) {
+        if (p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) {
+            base = 16;
+            p += 2;
+        } else if (p[0] == '0') {
+            base = 8;
+        } else {
+            base = 10;
+        }
+    } else if (base == 16 && p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) {
+        p += 2;
+    }
+
+    for (;; p++) {
+        unsigned digit;
+        if (*p >= '0' && *p <= '9') {
+            digit = (unsigned)(*p - '0');
+        } else if (*p >= 'a' && *p <= 'f') {
+            digit = (unsigned)(*p - 'a' + 10);
+        } else if (*p >= 'A' && *p <= 'F') {
+            digit = (unsigned)(*p - 'A' + 10);
+        } else {
+            break;
+        }
+        if (digit >= (unsigned)base) {
+            break;
+        }
+        value = value * (unsigned long)base + digit;
+    }
+
+    if (end != NULL) {
+        *end = (char *)p;
+    }
+    return value;
+}
+
 /* ---- formatted output ---- */
 
 /* Print an unsigned value in the given base; upper selects A-F vs a-f. */

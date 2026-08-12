@@ -26,6 +26,10 @@ void fb_clear(void);
 /* Set the colors used for subsequently drawn text. */
 void fb_set_color(uint32_t fg, uint32_t bg);
 
+/* Fill the whole framebuffer with one color (pixels only; the text
+ * buffer is untouched so on-screen text survives a redraw). */
+void fb_fill(uint32_t color);
+
 /* Copy the framebuffer description; any pointer may be NULL. */
 void fb_get_info(uint32_t *width, uint32_t *height, uint32_t *bpp,
                  uint64_t *pitch, void **address);

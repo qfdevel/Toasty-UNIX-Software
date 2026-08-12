@@ -19,9 +19,24 @@
 #include "io.h"
 #include "core/console.h"
 #include "core/klib.h"
+#include "syscall/syscall.h"
 
 /* 64-bit interrupt gate: present, DPL 0. IF is cleared on entry. */
 #define IDT_GATE_64_INTERRUPT 0x8E
+
+/* 64-bit trap gate at DPL 3: used for the syscall vector (int 0x80),
+ * callable from user mode once processes exist, without clearing IF. */
+#define IDT_GATE_64_TRAP_USER 0xEF
+
+/* Vector used for POSIX system calls. */
+#define IDT_VECTOR_SYSCALL 0x80
+
+/* 64-bit trap gate at DPL 3: used for the syscall vector (int 0x80),
+ * callable from user mode once processes exist, without clearing IF. */
+#define IDT_GATE_64_TRAP_USER 0xEF
+
+/* Vector used for POSIX system calls. */
+#define IDT_VECTOR_SYSCALL 0x80
 
 /* Code segment selector the kernel runs in. The Limine boot protocol
  * guarantees that the kernel is entered with CS = 0x28 (64-bit code)
@@ -80,6 +95,11 @@ static void exception_fatal(const struct interrupt_frame *frame,
     kprintf("Exception %d: %s\n", vec, g_exception_names[vec]);
     if (has_error_code) {
         kprintf("Error code: 0x%llx\n", (unsigned long long)error_code);
+    }
+    if (vec == 14) { /* Page Fault: CR2 holds the faulting address. */
+        uint64_t cr2;
+        __asm__ volatile("mov %%cr2, %0" : "=r"(cr2));
+        kprintf("CR2     : 0x%llx\n", (unsigned long long)cr2);
     }
     kprintf("RIP    : 0x%llx\n", (unsigned long long)frame->rip);
     kprintf("CS     : 0x%llx\n", (unsigned long long)frame->cs);
@@ -195,14 +215,18 @@ __attribute__((interrupt)) static void irq_ignored(struct interrupt_frame *frame
     (void)frame;
 }
 
-static void idt_set_gate(int vector, uintptr_t handler) {
+static void idt_set_gate_attr(int vector, uintptr_t handler, uint8_t attributes) {
     g_idt[vector].offset_low  = (uint16_t)(handler & 0xFFFF);
     g_idt[vector].selector    = KERNEL_CODE_SELECTOR;
     g_idt[vector].ist         = 0;
-    g_idt[vector].attributes  = IDT_GATE_64_INTERRUPT;
+    g_idt[vector].attributes  = attributes;
     g_idt[vector].offset_mid  = (uint16_t)((handler >> 16) & 0xFFFF);
     g_idt[vector].offset_high = (uint32_t)((handler >> 32) & 0xFFFFFFFF);
     g_idt[vector].zero        = 0;
+}
+
+static void idt_set_gate(int vector, uintptr_t handler) {
+    idt_set_gate_attr(vector, handler, IDT_GATE_64_INTERRUPT);
 }
 
 void idt_init(void) {
@@ -215,6 +239,10 @@ void idt_init(void) {
             idt_set_gate(vector, STUB_CAST(irq_ignored));
         }
     }
+
+    /* POSIX system call gate (int 0x80), trap gate at DPL 3. */
+    idt_set_gate_attr(IDT_VECTOR_SYSCALL, STUB_CAST(syscall_entry),
+                      IDT_GATE_64_TRAP_USER);
 
     g_idt_ptr.limit = (uint16_t)(sizeof(g_idt) - 1);
     g_idt_ptr.base  = (uint64_t)(uintptr_t)g_idt;

@@ -90,13 +90,23 @@ def type_text(sock, text):
             sendkey(sock, "backspace")
         elif ch == " ":
             sendkey(sock, "spc")
+        elif ch == "/":
+            sendkey(sock, "slash")
+        elif ch == ">":
+            sendkey(sock, "shift-dot")
+        elif ch == ".":
+            sendkey(sock, "dot")
+        elif ch == "-":
+            sendkey(sock, "minus")
+        elif ch == "_":
+            sendkey(sock, "shift-minus")
         elif ch.isupper():
             sendkey(sock, f"shift-{ch.lower()}")
         elif ch.isalpha() or ch.isdigit():
             sendkey(sock, ch)
         else:
             raise AssertionError(f"no sendkey mapping for {ch!r}")
-        time.sleep(0.02)
+        time.sleep(0.05)
 
 
 def start_qemu():
@@ -127,7 +137,6 @@ def count_nonblack_pixels(path):
     with open(path, "rb") as f:
         data = f.read()
     assert data.startswith(b"P6"), "not a P6 PPM"
-    # header: P6 \n W H \n 255 \n (max one whitespace run per field)
     parts = data[:200].split()
     width, height = int(parts[1]), int(parts[2])
     body = data[data.index(b"\n255\n") + 5:]
@@ -136,6 +145,20 @@ def count_nonblack_pixels(path):
     for i in range(0, width * height * 3, 3):
         r, g, b = body[i], body[i + 1], body[i + 2]
         if r > 8 or g > 8 or b > 8:
+            count += 1
+    return count
+
+
+def count_white_pixels(path):
+    """P6 PPM: count pixels that are pure white (255,255,255)."""
+    with open(path, "rb") as f:
+        data = f.read()
+    parts = data[:200].split()
+    width, height = int(parts[1]), int(parts[2])
+    body = data[data.index(b"\n255\n") + 5:]
+    count = 0
+    for i in range(0, width * height * 3, 3):
+        if body[i] == 255 and body[i + 1] == 255 and body[i + 2] == 255:
             count += 1
     return count
 
@@ -156,42 +179,83 @@ def main():
         # 1. help
         type_text(sock, "help\r")
         offset = wait_for("Available commands:", offset=offset)
-        offset = wait_for("reboot", offset=offset)
-        ok("help lists the command table")
+        offset = wait_for("fbfill", offset=offset)
+        ok("help lists the command table (incl. new fs commands)")
 
         # 2. echo + backspace editing (types "echoo" then fixes it)
         type_text(sock, "echoo\b hi\r")
         offset = wait_for("hi", offset=offset)
         ok("echo prints its arguments")
 
-        # 3. ver
+        # 3. ver (0.2.0 now)
         type_text(sock, "ver\r")
-        offset = wait_for("TUS kernel 0.1.0", offset=offset)
+        offset = wait_for("TUS kernel 0.2.0", offset=offset)
         ok("ver reports the kernel version")
 
-        # 4. sysinfo
+        # 4. sysinfo (now with PMM stats and uptime)
         type_text(sock, "sysinfo\r")
         offset = wait_for("MiB usable", offset=offset)
+        offset = wait_for("PMM", offset=offset)
+        offset = wait_for("Uptime", offset=offset)
         offset = wait_for("Framebuffer", offset=offset)
-        ok("sysinfo reports memory and framebuffer")
+        ok("sysinfo reports memory, PMM, uptime and framebuffer")
 
         # 5. about
         type_text(sock, "about\r")
         offset = wait_for("Toasty Unix Software", offset=offset)
         ok("about shows the TUS identity")
 
-        # 6. framebuffer console actually drew pixels
-        screendump(sock)
-        lit = count_nonblack_pixels(SCREEN_PPM)
-        assert lit > 1000, f"screen mostly empty ({lit} lit pixels)"
-        ok(f"framebuffer console renders text ({lit} lit pixels)")
+        # 6. uptime (PIT timer through the syscall ABI)
+        type_text(sock, "uptime\r")
+        offset = wait_for("uptime:", offset=offset)
+        ok("uptime reports elapsed time via the PIT")
 
-        # 7. unknown command error path
+        # 7. VFS: ls /
+        type_text(sock, "ls /\r")
+        offset = wait_for("etc", offset=offset)
+        offset = wait_for("dev", offset=offset)
+        ok("ls / lists the root directory tree")
+
+        # 8. VFS: ls /dev shows the device nodes (list order is
+        #    reverse creation order: zero, null, serial0, kbd0, tty0, fb0)
+        type_text(sock, "ls /dev\r")
+        offset = wait_for("zero", offset=offset)
+        offset = wait_for("tty0", offset=offset)
+        offset = wait_for("fb0", offset=offset)
+        ok("ls /dev lists the built-in devices")
+
+        # 9. cat /etc/motd
+        type_text(sock, "cat /etc/motd\r")
+        offset = wait_for("Welcome to TUS", offset=offset)
+        offset = wait_for("Work everywhere", offset=offset)
+        ok("cat /etc/motd reads a seeded file")
+
+        # 10. echo with redirection, then cat it back
+        type_text(sock, "echo hello world > /tmp/greet\r")
+        type_text(sock, "cat /tmp/greet\r")
+        offset = wait_for("hello world", offset=offset)
+        ok("echo > file writes through the syscall ABI")
+
+        # 11. mkdir + ls
+        type_text(sock, "mkdir /tmp/sub\r")
+        type_text(sock, "ls /tmp\r")
+        offset = wait_for("sub", offset=offset)
+        ok("mkdir creates a directory")
+
+        # 12. fbfill paints the whole framebuffer white (ioctl)
+        type_text(sock, "fbfill ffffff\r")
+        offset = wait_for("filled with #ffffff", offset=offset)
+        screendump(sock)
+        white = count_white_pixels(SCREEN_PPM)
+        assert white > 900000, f"fbfill did not paint the screen ({white} white)"
+        ok(f"fbfill fills the framebuffer via /dev/fb0 ioctl ({white} px)")
+
+        # 13. unknown command error path
         type_text(sock, "nosuchcmd\r")
         offset = wait_for("command not found", offset=offset)
         ok("unknown command produces an error")
 
-        # 8. crash -> kernel panic handler with register dump
+        # 14. crash -> kernel panic handler with register dump
         type_text(sock, "crash\r")
         offset = wait_for("KERNEL PANIC", offset=offset)
         offset = wait_for("Invalid Opcode", offset=offset)

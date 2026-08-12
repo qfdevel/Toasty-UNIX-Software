@@ -18,6 +18,7 @@ struct bootinfo {
     const char *bootloader_version;              /* e.g. "12.5.2"  */
     struct limine_framebuffer *framebuffer;      /* NULL if absent  */
     uint64_t usable_memory_bytes;                /* sum of usable RAM */
+    uint64_t hhdm_offset;                        /* phys -> higher-half */
 };
 
 extern struct bootinfo g_bootinfo;

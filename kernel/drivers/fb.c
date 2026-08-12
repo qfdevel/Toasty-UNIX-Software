@@ -172,6 +172,14 @@ void fb_set_color(uint32_t fg, uint32_t bg) {
     g_bg = bg;
 }
 
+void fb_fill(uint32_t color) {
+    uint32_t *p = g_pixels;
+    uint64_t words = (g_pitch_bytes / 4) * g_height;
+    for (uint64_t i = 0; i < words; i++) {
+        p[i] = color;
+    }
+}
+
 void fb_get_info(uint32_t *width, uint32_t *height, uint32_t *bpp,
                  uint64_t *pitch, void **address) {
     if (width) {

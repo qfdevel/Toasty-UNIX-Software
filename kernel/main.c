@@ -20,8 +20,13 @@
 #include "core/console.h"
 #include "core/klib.h"
 #include "drivers/keyboard.h"
+#include "drivers/pit.h"
 #include "drivers/serial.h"
+#include "mm/kmalloc.h"
+#include "mm/pmm.h"
+#include "mm/vmm.h"
 #include "shell/tsh.h"
+#include "vfs/vfs.h"
 
 /* ---- Limine boot protocol requests ----
  *
@@ -48,6 +53,12 @@ static volatile struct limine_bootloader_info_request bootloader_info_request = 
     .revision = 0
 };
 
+__attribute__((used, section(".requests")))
+static volatile struct limine_hhdm_request hhdm_request = {
+    .id = LIMINE_HHDM_REQUEST_ID,
+    .revision = 0
+};
+
 /*
  * Base revision: tells Limine which protocol features we rely on.
  * Revision 2 means "higher-half kernel, HHDM offset, framebuffers
@@ -68,6 +79,9 @@ static void fill_bootinfo(void) {
     g_bootinfo.framebuffer = (framebuffer_request.response != NULL &&
                               framebuffer_request.response->framebuffer_count > 0)
         ? framebuffer_request.response->framebuffers[0] : NULL;
+
+    g_bootinfo.hhdm_offset = hhdm_request.response != NULL
+        ? hhdm_request.response->offset : 0;
 
     uint64_t total = 0;
     if (memmap_request.response != NULL) {
@@ -108,6 +122,14 @@ static void print_boot_banner(void) {
     }
     console_write("serial       : COM1 @ 115200 8N1 (debug mirror)\n");
     console_write("keyboard     : PS/2 scancode set 1, IRQ1\n");
+    kprintf("timer        : PIT 100 Hz (IRQ0)\n");
+    uint64_t total_frames = 0, free_frames = 0;
+    pmm_get_stats(&total_frames, &free_frames);
+    kprintf("pmm          : %llu free / %llu frames (%llu MiB usable)\n",
+            (unsigned long long)free_frames,
+            (unsigned long long)total_frames,
+            (unsigned long long)(g_bootinfo.usable_memory_bytes / (1024 * 1024)));
+    console_write("vfs          : /dev/fb0 tty0 kbd0 serial0 null zero\n");
     console_write("------------------------------------------------\n");
     console_write("tsh ready. Type 'help' to list the commands.\n\n");
 }
@@ -122,7 +144,15 @@ void _start(void) {
     idt_init();
     pic_init();
 
+    /* Memory: physical frames, page tables, kernel heap. */
+    pmm_init(memmap_request.response, g_bootinfo.hhdm_offset);
+    vmm_init();
+    kmalloc_init();
+
+    /* Devices and services. */
+    pit_init();
     kbd_init();
+    vfs_init();
 
     print_boot_banner();
 

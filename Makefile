@@ -25,6 +25,7 @@ LDFLAGS := -m elf_x86_64 -T kernel/linker.ld
 
 KERNEL_SRCS := $(shell find kernel -name '*.c')
 KERNEL_OBJS := $(KERNEL_SRCS:.c=.o)
+DEPS        := $(KERNEL_OBJS:.o=.d)
 
 .PHONY: all iso run test clean
 
@@ -34,7 +35,12 @@ kernel.elf: $(KERNEL_OBJS) kernel/linker.ld
 	$(LD) $(LDFLAGS) -o $@ $(KERNEL_OBJS)
 
 %.o: %.c
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
+
+# Header dependency tracking: rebuild objects when the headers they
+# include change (without this, editing a .h silently tests a stale
+# kernel).
+-include $(DEPS)
 
 # Assemble the hybrid BIOS/UEFI ISO from the limine-bin/ files.
 iso: kernel.elf
@@ -59,4 +65,4 @@ test: iso
 	python3 tests/test_boot.py
 
 clean:
-	rm -rf $(KERNEL_OBJS) kernel.elf tus.iso iso_root
+	rm -rf $(KERNEL_OBJS) $(DEPS) kernel.elf tus.iso iso_root
