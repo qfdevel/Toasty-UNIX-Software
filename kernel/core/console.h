@@ -27,6 +27,9 @@ void console_write(const char *s);
 /* Clear the framebuffer console (no-op on serial). */
 void console_clear(void);
 
+/* Scroll the framebuffer console one page (PageUp/PageDown). */
+void console_scroll_page(int dir);
+
 /* Set the foreground/background colors used by the framebuffer console. */
 void console_set_color(uint32_t fg, uint32_t bg);
 

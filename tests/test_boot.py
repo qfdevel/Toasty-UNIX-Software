@@ -124,12 +124,20 @@ def start_qemu():
         stdout=open(QEMU_LOG, "w"), stderr=subprocess.STDOUT)
 
 
-def screendump(sock):
-    qmp_cmd(sock, "screendump", {"filename": SCREEN_PPM})
+def screendump(sock, name=None):
+    path = name or SCREEN_PPM
+    qmp_cmd(sock, "screendump", {"filename": path})
     deadline = time.time() + 10
-    while time.time() < deadline and not os.path.exists(SCREEN_PPM):
+    while time.time() < deadline:
+        try:
+            with open(path, "rb") as f:
+                f.seek(0, 2)
+                if f.tell() > 0:
+                    break
+        except FileNotFoundError:
+            pass
         time.sleep(0.1)
-    assert os.path.exists(SCREEN_PPM), "screendump produced no file"
+    assert os.path.exists(path), "screendump produced no file"
 
 
 def count_nonblack_pixels(path):
@@ -242,7 +250,39 @@ def main():
         offset = wait_for("sub", offset=offset)
         ok("mkdir creates a directory")
 
-        # 12. fbfill paints the whole framebuffer white (ioctl)
+        # 12. scrollback: overflow the screen, PageUp shows older
+        #     lines, PageDown returns to the exact live view.
+        #     (Runs BEFORE fbfill: that test paints the screen and
+        #     would leave white remnants that skew the pixel counts.)
+        for _ in range(3):
+            type_text(sock, "help\r")
+        time.sleep(1.5)  # let all output settle (TCG is slow)
+        screendump(sock, "/tmp/tus-live.ppm")
+        live_lit = count_nonblack_pixels("/tmp/tus-live.ppm")
+        sendkey(sock, "pgup")
+        time.sleep(0.25)
+        sendkey(sock, "pgup")
+        time.sleep(0.25)
+        sendkey(sock, "pgup")
+        time.sleep(0.3)
+        screendump(sock, "/tmp/tus-back.ppm")
+        back_lit = count_nonblack_pixels("/tmp/tus-back.ppm")
+        assert back_lit != live_lit, \
+            f"PageUp did not change the screen ({live_lit} == {back_lit})"
+        sendkey(sock, "pgdn")
+        time.sleep(0.25)
+        sendkey(sock, "pgdn")
+        time.sleep(0.25)
+        sendkey(sock, "pgdn")
+        time.sleep(0.3)
+        screendump(sock, "/tmp/tus-restored.ppm")
+        restored_lit = count_nonblack_pixels("/tmp/tus-restored.ppm")
+        assert restored_lit == live_lit, \
+            f"PageDown did not restore the live view ({restored_lit} != {live_lit})"
+        ok(f"scrollback: PageUp/PageDown navigate history "
+           f"({live_lit} live, {back_lit} back, {restored_lit} restored)")
+
+        # 13. fbfill paints the whole framebuffer white (ioctl)
         type_text(sock, "fbfill ffffff\r")
         offset = wait_for("filled with #ffffff", offset=offset)
         screendump(sock)
@@ -250,12 +290,12 @@ def main():
         assert white > 900000, f"fbfill did not paint the screen ({white} white)"
         ok(f"fbfill fills the framebuffer via /dev/fb0 ioctl ({white} px)")
 
-        # 13. unknown command error path
+        # 14. unknown command error path
         type_text(sock, "nosuchcmd\r")
         offset = wait_for("command not found", offset=offset)
         ok("unknown command produces an error")
 
-        # 14. crash -> kernel panic handler with register dump
+        # 15. crash -> kernel panic handler with register dump
         type_text(sock, "crash\r")
         offset = wait_for("KERNEL PANIC", offset=offset)
         offset = wait_for("Invalid Opcode", offset=offset)

@@ -121,6 +121,10 @@ automated checks).
   redirection), `mkdir`, `touch`, `rm`, `uptime`, `sleep`,
   `fbfill <hexcolor>`; `sysinfo` now shows PMM stats + uptime. All
   file commands go through the syscall ABI (dogfooding).
+- **Terminal scrollback**: completed lines are kept in a 2048-line
+  history ring; PageUp/PageDown scroll the view (any new output snaps
+  back to live). Cells store a palette index so scrolled-back text
+  keeps its exact colors (prompt accent included).
 
 Verified session (serial log):
 
@@ -180,6 +184,20 @@ interrupt-driven PS/2 keyboard, and an interactive `tsh`. Verified by
    makes `ls /` show `/dev` but `ls /dev` fail with ENOENT.
 10. **`devices_init()` must run before `vfs_init` pre-opens fd 0/1/2**
     on `/dev/tty0`, or the standard descriptors stay NULL.
+11. **Scrollback redraws must reproduce colors**: if the text buffer
+    stores only characters, a PageUp/PageDown redraw paints every
+    line in the *current* color — the orange prompt turns white. Each
+    cell therefore stores a palette index (16 color pairs), and
+    `fb_set_color` looks up/appends the pair. Verified pixel-identical
+    (50/50 rows) after a scroll round-trip.
+12. **QEMU screendump timing**: writing consecutive screendumps to the
+    *same* file races — the second read may see the previous frame
+    (QEMU truncates/writes asynchronously). Use distinct filenames
+    and wait for the file to be non-empty before reading.
+13. **kprintf goes to the framebuffer too**: debug prints inside the
+    console/scrollback code add lines to the live screen and history,
+    skewing pixel-count tests. Remove debug prints before testing
+    screen content.
 
 ## 6. Toolchain Status (verified 2026-08-12)
 

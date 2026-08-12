@@ -37,7 +37,19 @@ void tsh_run(void) {
     tsh_prompt();
 
     for (;;) {
-        char c = kbd_getchar();
+        struct kbd_event ev = kbd_get_event();
+
+        /* PageUp/PageDown navigate the framebuffer scrollback. */
+        if (ev.type == KBD_EVENT_SCROLL_UP) {
+            console_scroll_page(1);
+            continue;
+        }
+        if (ev.type == KBD_EVENT_SCROLL_DOWN) {
+            console_scroll_page(-1);
+            continue;
+        }
+
+        char c = ev.c;
 
         if (c == '\n') {
             console_putchar('\n');

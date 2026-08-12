@@ -9,6 +9,7 @@
 #ifndef TUS_DRIVERS_FB_H
 #define TUS_DRIVERS_FB_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 #include <limine.h>
@@ -22,6 +23,14 @@ void fb_putchar(char c);
 
 /* Clear the screen and reset the cursor to the top-left corner. */
 void fb_clear(void);
+
+/* Scroll the visible window one page. dir > 0 looks back into the
+ * scrollback history (PageUp), dir < 0 returns towards the live
+ * output (PageDown). Any new output snaps back to live mode. */
+void fb_scroll_page(int dir);
+
+/* True while the window is scrolled back into history. */
+bool fb_view_scrolled(void);
 
 /* Set the colors used for subsequently drawn text. */
 void fb_set_color(uint32_t fg, uint32_t bg);

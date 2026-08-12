@@ -37,6 +37,12 @@ void console_clear(void) {
     }
 }
 
+void console_scroll_page(int dir) {
+    if (g_fb_active) {
+        fb_scroll_page(dir);
+    }
+}
+
 void console_set_color(uint32_t fg, uint32_t bg) {
     if (g_fb_active) {
         fb_set_color(fg, bg);

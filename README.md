@@ -13,7 +13,8 @@ codebase.
 - **Serial driver** - 16550 UART on COM1 (115200 8N1), debug mirror for
   all console output
 - **Framebuffer console** - 8x16 text grid over the Limine-provided
-  framebuffer
+  framebuffer, with a 2048-line scrollback (PageUp/PageDown) that
+  preserves per-cell colors
 - **Keyboard driver** - PS/2 scancode set 1, interrupt driven, Shift /
   Caps Lock / Ctrl handling and Caps Lock LED feedback
 - **Physical memory manager** - bitmap frame allocator over the Limine

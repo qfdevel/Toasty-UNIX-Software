@@ -29,6 +29,10 @@
 #define SC_RSHIFT       0x36
 #define SC_CAPS_LOCK    0x3A
 
+/* Extended (0xE0-prefixed) make codes we understand. */
+#define SC_PAGE_UP      0x49
+#define SC_PAGE_DOWN    0x51
+
 /* ---- scancode set 1 -> ASCII (US layout), indexed by scancode ---- */
 
 static const char kbd_normal[128] = {
@@ -69,7 +73,7 @@ static const char kbd_shifted[128] = {
 
 /* ---- keyboard state ---- */
 
-static volatile char g_buffer[KBD_BUFFER_SIZE];
+static volatile struct kbd_event g_buffer[KBD_BUFFER_SIZE];
 static volatile int g_head; /* next slot to write (IRQ context) */
 static volatile int g_tail; /* next slot to read (shell context) */
 
@@ -78,13 +82,18 @@ static bool g_ctrl_pressed;
 static bool g_caps_locked;
 static bool g_extended; /* set after a 0xE0 prefix byte */
 
-/* Push one character into the ring buffer; drops on overflow. */
-static void kbd_push(char c) {
+/* Push one event into the ring buffer; drops on overflow. */
+static void kbd_push_event(const struct kbd_event *ev) {
     int next = (g_head + 1) % KBD_BUFFER_SIZE;
     if (next != g_tail) {
-        g_buffer[g_head] = c;
+        g_buffer[g_head] = *ev;
         g_head = next;
     }
+}
+
+static void kbd_push_char(char c) {
+    struct kbd_event ev = { KBD_EVENT_CHAR, c };
+    kbd_push_event(&ev);
 }
 
 /*
@@ -130,7 +139,17 @@ static void kbd_irq_handler(struct interrupt_frame *frame) {
     }
     if (g_extended) {
         g_extended = false;
-        return; /* extended keys (arrows, keypad) are not mapped yet */
+        if (!(scancode & 0x80)) { /* make (press) only */
+            struct kbd_event ev;
+            if ((scancode & 0x7F) == SC_PAGE_UP) {
+                ev.type = KBD_EVENT_SCROLL_UP;
+                kbd_push_event(&ev);
+            } else if ((scancode & 0x7F) == SC_PAGE_DOWN) {
+                ev.type = KBD_EVENT_SCROLL_DOWN;
+                kbd_push_event(&ev);
+            }
+        }
+        return; /* other extended keys (arrows, keypad) are unmapped */
     }
 
     bool make = !(scancode & 0x80);
@@ -177,7 +196,7 @@ static void kbd_irq_handler(struct interrupt_frame *frame) {
         c = (char)(c & 0x1F);
     }
 
-    kbd_push(c);
+    kbd_push_char(c);
 }
 
 void kbd_init(void) {
@@ -185,23 +204,37 @@ void kbd_init(void) {
     pic_enable_irq(KBD_IRQ);
 }
 
-char kbd_getchar(void) {
-    /* Sleep until the keyboard IRQ wakes us with a new character. */
+struct kbd_event kbd_get_event(void) {
+    /* Sleep until the keyboard IRQ wakes us with a new event. */
     while (g_head == g_tail) {
         hlt();
     }
-    char c = g_buffer[g_tail];
+    struct kbd_event ev = g_buffer[g_tail];
     g_tail = (g_tail + 1) % KBD_BUFFER_SIZE;
-    return c;
+    return ev;
+}
+
+char kbd_getchar(void) {
+    for (;;) {
+        struct kbd_event ev = kbd_get_event();
+        if (ev.type == KBD_EVENT_CHAR) {
+            return ev.c;
+        }
+        /* Scroll events are consumed by the console layer (the shell
+         * never sees them as characters). */
+    }
 }
 
 int kbd_poll(void) {
     if (g_head == g_tail) {
         return -1;
     }
-    char c = g_buffer[g_tail];
+    struct kbd_event ev = g_buffer[g_tail];
     g_tail = (g_tail + 1) % KBD_BUFFER_SIZE;
-    return c;
+    if (ev.type != KBD_EVENT_CHAR) {
+        return -1; /* non-character event; retry */
+    }
+    return ev.c;
 }
 
 bool kbd_has_char(void) {

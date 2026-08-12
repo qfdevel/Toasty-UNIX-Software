@@ -18,7 +18,6 @@
 #include "../drivers/fb.h"
 #include "../drivers/keyboard.h"
 #include "../drivers/serial.h"
-
 /* ---- /dev/fb0 ---- */
 
 static long fb_read(void *priv, void *buf, size_t count, size_t pos) {
@@ -71,12 +70,22 @@ static long tty_read(void *priv, void *buf, size_t count, size_t pos) {
     if (count == 0) {
         return 0;
     }
-    char c = kbd_getchar();
-    if (c == 0x1B) { /* ESC ends the stream (lets `cat` exit) */
-        return 0;
+    for (;;) {
+        struct kbd_event ev = kbd_get_event();
+        if (ev.type == KBD_EVENT_SCROLL_UP) {
+            console_scroll_page(1);
+            continue;
+        }
+        if (ev.type == KBD_EVENT_SCROLL_DOWN) {
+            console_scroll_page(-1);
+            continue;
+        }
+        if (ev.c == 0x1B) { /* ESC ends the stream (lets `cat` exit) */
+            return 0;
+        }
+        *(char *)buf = ev.c;
+        return 1;
     }
-    *(char *)buf = c;
-    return 1;
 }
 
 static long tty_write(void *priv, const void *buf, size_t count, size_t pos) {
@@ -97,12 +106,22 @@ static long kbd_read(void *priv, void *buf, size_t count, size_t pos) {
     if (count == 0) {
         return 0;
     }
-    char c = kbd_getchar();
-    if (c == 0x1B) {
-        return 0;
+    for (;;) {
+        struct kbd_event ev = kbd_get_event();
+        if (ev.type == KBD_EVENT_SCROLL_UP) {
+            console_scroll_page(1);
+            continue;
+        }
+        if (ev.type == KBD_EVENT_SCROLL_DOWN) {
+            console_scroll_page(-1);
+            continue;
+        }
+        if (ev.c == 0x1B) {
+            return 0;
+        }
+        *(char *)buf = ev.c;
+        return 1;
     }
-    *(char *)buf = c;
-    return 1;
 }
 
 /* ---- /dev/serial0 ---- */
