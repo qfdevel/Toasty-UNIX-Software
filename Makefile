@@ -27,6 +27,16 @@ KERNEL_SRCS := $(shell find kernel -name '*.c')
 KERNEL_OBJS := $(KERNEL_SRCS:.c=.o)
 DEPS        := $(KERNEL_OBJS:.o=.d)
 
+# Embedded test program for the ELF loader: tests/hello.elf is
+# converted to an object file (binary blob) and linked into the
+# kernel, then exposed at /boot/hello.elf in the VFS.
+TEST_ELF_SRC := tests/hello.c
+TEST_ELF     := tests/hello.elf
+TEST_ELF_OBJ := tests/hello.o
+TEST_ELF_BLOB := tests/hello_blob.o
+
+KERNEL_OBJS += $(TEST_ELF_BLOB)
+
 .PHONY: all iso run test clean
 
 all: kernel.elf
@@ -36,6 +46,16 @@ kernel.elf: $(KERNEL_OBJS) kernel/linker.ld
 
 %.o: %.c
 	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
+
+$(TEST_ELF): $(TEST_ELF_SRC)
+	$(CC) -m64 -ffreestanding -fno-stack-protector -fno-pic \
+		-mno-red-zone -mgeneral-regs-only -O2 -c $(TEST_ELF_SRC) -o $(TEST_ELF_OBJ)
+	$(LD) -m elf_x86_64 -static -e _start -Ttext 0x400000 -o $@ $(TEST_ELF_OBJ)
+
+# ld -r -b binary turns a file into an object with symbols
+# _binary_<name>_start/_end; the kernel copies it into the VFS.
+$(TEST_ELF_BLOB): $(TEST_ELF)
+	$(LD) -r -b binary $(TEST_ELF) -o $@
 
 # Header dependency tracking: rebuild objects when the headers they
 # include change (without this, editing a .h silently tests a stale
@@ -65,4 +85,4 @@ test: iso
 	python3 tests/test_boot.py
 
 clean:
-	rm -rf $(KERNEL_OBJS) $(DEPS) kernel.elf tus.iso iso_root
+	rm -rf $(KERNEL_OBJS) $(DEPS) kernel.elf tus.iso iso_root $(TEST_ELF) $(TEST_ELF_OBJ)

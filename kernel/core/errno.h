@@ -20,6 +20,7 @@
 #define EINVAL  22 /* invalid argument */
 #define ENOTTY  25 /* inappropriate ioctl for device */
 #define ENOSPC  28 /* no space left on device */
+#define ENOEXEC 8  /* exec format error */
 #define ENOSYS  38 /* function not implemented */
 
 #endif /* TUS_CORE_ERRNO_H */

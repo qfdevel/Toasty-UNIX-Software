@@ -22,6 +22,7 @@
 #include "drivers/keyboard.h"
 #include "drivers/pit.h"
 #include "drivers/serial.h"
+#include "elf/tus_elf.h"
 #include "mm/kmalloc.h"
 #include "mm/pmm.h"
 #include "mm/vmm.h"
@@ -153,6 +154,7 @@ void _start(void) {
     pit_init();
     kbd_init();
     vfs_init();
+    elf_install_test_program();
 
     print_boot_banner();
 

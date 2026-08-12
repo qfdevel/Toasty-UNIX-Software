@@ -34,6 +34,9 @@ codebase.
 - **tsh** - interactive shell: `help`, `echo`, `clear`, `ver`, `about`,
   `sysinfo`, `reboot`, `crash`, `ls`, `cat`, `mkdir`, `touch`, `rm`,
   `uptime`, `sleep`, `fbfill`
+- **ELF loader** - runs static (ET_EXEC) x86-64 binaries via
+  `tsh`'s `exec` command; an embedded demo program lives at
+  `/boot/hello.elf`
 - **Interrupt handling** - full IDT, remapped PIC, register dump on CPU
   exceptions (kernel panic, incl. CR2 on page faults)
 
@@ -50,10 +53,11 @@ TOS/
 │   ├── core/              klib (mem + printf), console, bootinfo
 │   ├── drivers/           serial, keyboard, framebuffer, PIT
 │   ├── mm/                PMM, VMM, kmalloc
+│   ├── elf/               elfload port + TUS exec glue
 │   ├── vfs/               VFS tree, fd table, device nodes
 │   ├── syscall/           int $0x80 gate and dispatch
 │   └── shell/             tsh, core commands, fs commands
-├── tests/test_boot.py     automated boot + shell test (16 checks)
+├── tests/                 test_boot.py (18 checks) + hello.c demo ELF
 ├── Makefile
 └── limine.conf
 ```
@@ -81,6 +85,7 @@ cat /tmp/greet
 ls /dev
 fbfill 336699
 uptime
+exec /boot/hello.elf
 ```
 
 Automated headless test (boots, types into the virtual keyboard,

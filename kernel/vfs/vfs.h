@@ -87,6 +87,10 @@ long vfs_readdir(long fd, void *buf, size_t count);
 long vfs_mkdir(const char *path);
 long vfs_unlink(const char *path);
 
+/* Read from a file at an explicit offset, without moving the fd's
+ * position (used by the ELF loader). Returns bytes read or -errno. */
+long vfs_pread(long fd, void *buf, size_t count, size_t offset);
+
 /* Return the node for a path, or NULL. */
 struct vfs_node *vfs_lookup(const char *path);
 

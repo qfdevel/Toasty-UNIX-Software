@@ -250,7 +250,15 @@ def main():
         offset = wait_for("sub", offset=offset)
         ok("mkdir creates a directory")
 
-        # 12. scrollback: overflow the screen, PageUp shows older
+        # 12. ELF loader: run the embedded static binary
+        type_text(sock, "ls /boot\r")
+        offset = wait_for("hello.elf", offset=offset)
+        type_text(sock, "exec /boot/hello.elf\r")
+        offset = wait_for("Hello from a static ELF", offset=offset)
+        offset = wait_for("returned", offset=offset)
+        ok("exec runs a static ELF image and returns to the shell")
+
+        # 13. scrollback: overflow the screen, PageUp shows older
         #     lines, PageDown returns to the exact live view.
         #     (Runs BEFORE fbfill: that test paints the screen and
         #     would leave white remnants that skew the pixel counts.)
@@ -282,7 +290,7 @@ def main():
         ok(f"scrollback: PageUp/PageDown navigate history "
            f"({live_lit} live, {back_lit} back, {restored_lit} restored)")
 
-        # 13. fbfill paints the whole framebuffer white (ioctl)
+        # 14. fbfill paints the whole framebuffer white (ioctl)
         type_text(sock, "fbfill ffffff\r")
         offset = wait_for("filled with #ffffff", offset=offset)
         screendump(sock)
@@ -290,12 +298,12 @@ def main():
         assert white > 900000, f"fbfill did not paint the screen ({white} white)"
         ok(f"fbfill fills the framebuffer via /dev/fb0 ioctl ({white} px)")
 
-        # 14. unknown command error path
+        # 15. unknown command error path
         type_text(sock, "nosuchcmd\r")
         offset = wait_for("command not found", offset=offset)
         ok("unknown command produces an error")
 
-        # 15. crash -> kernel panic handler with register dump
+        # 16. crash -> kernel panic handler with register dump
         type_text(sock, "crash\r")
         offset = wait_for("KERNEL PANIC", offset=offset)
         offset = wait_for("Invalid Opcode", offset=offset)

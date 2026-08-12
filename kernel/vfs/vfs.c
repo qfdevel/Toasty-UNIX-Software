@@ -356,6 +356,28 @@ long vfs_read(long fd, void *buf, size_t count) {
     }
 }
 
+long vfs_pread(long fd, void *buf, size_t count, size_t offset) {
+    struct vfs_file *f = fd_get(fd);
+    if (f == NULL) {
+        return -EBADF;
+    }
+    if (buf == NULL) {
+        return -EINVAL;
+    }
+    if (f->node->type != VFS_FILE) {
+        return -EISDIR; /* positioned reads only make sense for files */
+    }
+    if (offset >= f->node->size) {
+        return 0; /* EOF */
+    }
+    size_t avail = f->node->size - offset;
+    if (count > avail) {
+        count = avail;
+    }
+    memcpy(buf, f->node->data + offset, count);
+    return (long)count;
+}
+
 long vfs_write(long fd, const void *buf, size_t count) {
     struct vfs_file *f = fd_get(fd);
     if (f == NULL) {

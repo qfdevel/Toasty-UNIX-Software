@@ -121,6 +121,19 @@ automated checks).
   redirection), `mkdir`, `touch`, `rm`, `uptime`, `sleep`,
   `fbfill <hexcolor>`; `sysinfo` now shows PMM stats + uptime. All
   file commands go through the syscall ABI (dogfooding).
+- **ELF loader** (`kernel/elf/`): port of the small `elfload`
+  library. Loads **static (ET_EXEC)** x86-64 images only — a binary
+  linked with `-static` — reading from the VFS (`vfs_pread`) and
+  mapping each PT_LOAD segment with the VMM. `tsh`'s `exec` command
+  runs the image and returns to the shell when it returns. An
+  embedded test program (`tests/hello.elf`) is exposed at
+  `/boot/hello.elf`; it calls the real syscall ABI and prints to
+  stdout. Images currently run on the kernel stack in ring 0 until
+  the scheduler milestone gives them an address space and a ring-3
+  environment.
+- **kmalloc large blocks**: allocations larger than one page are now
+  served from whole arena pages (header records the page count) so
+  the kernel can hold multi-KiB blobs such as ELF images.
 - **Terminal scrollback**: completed lines are kept in a 2048-line
   history ring; PageUp/PageDown scroll the view (any new output snaps
   back to live). Cells store a palette index so scrolled-back text
@@ -292,9 +305,10 @@ Design principles:
 | 9 | VFS + device nodes (`/dev/fb0`, tty0, kbd0, serial0, null, zero) | ✅ done (v0.2.0) |
 | 10 | POSIX syscall ABI (int $0x80, 12 syscalls, dogfooded by tsh) | ✅ done (v0.2.0) |
 | 11 | Automated test suite extended (16/16) | ✅ done (v0.2.0) |
-| 12 | Userspace: init, userspace tsh | ⏳ |
-| 13 | Scheduler + ring-3 enforcement of syscalls | ⏳ |
-| 14 | Physical disk driver + real filesystem | ⏳ |
+| 12 | ELF loader: run static (ET_EXEC) images (`exec` in tsh) | ✅ done (v0.2.1) |
+| 13 | Userspace: init, userspace tsh | ⏳ |
+| 14 | Scheduler + ring-3 enforcement of syscalls | ⏳ |
+| 15 | Physical disk driver + real filesystem | ⏳ |
 | ... | (expand as we go) | |
 
 ---

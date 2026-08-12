@@ -28,6 +28,7 @@
 
 struct block {
     size_t size;            /* payload size, multiple of ALIGN */
+    size_t pages;           /* >0: multi-page block (arena-allocated) */
     struct block *next;     /* free list link (only when free) */
 };
 
@@ -77,9 +78,24 @@ void *kmalloc(size_t size) {
     }
     size = align_up(size);
     if (size > PAGE_SIZE - HEADER_SIZE) {
-        /* Fall back to a contiguous multi-page block (simple: via
-         * the page granularity of the arena). Not used by the VFS. */
-        return NULL;
+        /* Large allocation: reserve whole arena pages and never put
+         * the block on the free list. The header records the page
+         * count so kfree() can release the frames again. */
+        size_t pages = (size + HEADER_SIZE + PAGE_SIZE - 1) / PAGE_SIZE;
+        struct block *b = (struct block *)g_arena_next;
+        for (size_t i = 0; i < pages; i++) {
+            uint64_t phys = pmm_alloc_frame();
+            if (phys == 0) {
+                return NULL;
+            }
+            vmm_map_page(g_arena_next + i * PAGE_SIZE, phys, VMM_WRITE);
+        }
+        b->size = size;
+        b->pages = pages;
+        b->next = NULL;
+        g_arena_next += pages * PAGE_SIZE;
+        g_arena_bytes += pages * PAGE_SIZE;
+        return (void *)((uint8_t *)b + HEADER_SIZE);
     }
 
     /* First-fit with splitting. */
@@ -116,6 +132,19 @@ void kfree(void *ptr) {
         return;
     }
     struct block *b = (struct block *)((uint8_t *)ptr - HEADER_SIZE);
+
+    /* Multi-page block: release its frames back to the PMM. */
+    if (b->pages > 0) {
+        uint64_t virt = (uint64_t)(uintptr_t)b;
+        for (size_t i = 0; i < b->pages; i++) {
+            uint64_t phys = vmm_translate(virt + i * PAGE_SIZE);
+            if (phys != 0) {
+                vmm_unmap_page(virt + i * PAGE_SIZE);
+                pmm_free_frame(phys);
+            }
+        }
+        return;
+    }
 
     /* Insert sorted by address, merging with both neighbours. */
     struct block **link = &g_free;
