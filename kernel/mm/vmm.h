@@ -39,4 +39,16 @@ void vmm_unmap_page(uint64_t virt);
 /* Translate a virtual address; returns 0 if unmapped. */
 uint64_t vmm_translate(uint64_t virt);
 
+/* Return the raw page-table entry for a virtual address (0 if any
+ * level is unmapped). Debug helper. */
+uint64_t vmm_pte(uint64_t virt);
+
+/* Return bitmask of NX bits set in the upper levels (PML4/PDPT/PD)
+ * for a virtual address. Debug helper: 0 means executable. */
+uint64_t vmm_level_nx(uint64_t virt);
+
+/* Return the raw page-table entry at `level` (1=PD, 2=PDPT, 3=PML4).
+ * Debug helper to inspect Limine's large-page mappings. */
+uint64_t vmm_level_entry(uint64_t virt, int level);
+
 #endif /* TUS_MM_VMM_H */

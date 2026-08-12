@@ -14,6 +14,9 @@
 /* Program channel 0 to 100 Hz and enable IRQ0. */
 void pit_init(void);
 
+/* Advance the tick counter; called from the scheduler's IRQ0 path. */
+void pit_tick(void);
+
 /* Number of ticks since boot (100 ticks = 1 second). */
 uint64_t pit_ticks(void);
 

@@ -13,6 +13,7 @@
 #include "../core/console.h"
 #include "../core/errno.h"
 #include "../drivers/pit.h"
+#include "../sched/sched.h"
 #include "../vfs/vfs.h"
 
 /* Register image as pushed by syscall_entry() (lowest address first). */
@@ -42,15 +43,10 @@ __attribute__((naked)) void syscall_entry(void) {
         "iretq\n");
 }
 
-/* exit(0): there are no user processes yet, so this halts the system
- * after a message. A future scheduler will terminate the caller. */
+/* exit(status): terminate the current task and switch to the next.
+ * Never returns. */
 __attribute__((noreturn)) static long sys_exit(int status) {
-    (void)status;
-    console_write("exit: no user processes yet - system halted.\n");
-    for (;;) {
-        cli();
-        hlt();
-    }
+    task_exit(status);
 }
 
 long syscall_dispatch(struct syscall_regs *r) {
@@ -67,8 +63,10 @@ long syscall_dispatch(struct syscall_regs *r) {
         return vfs_close((int)r->rdi);
     case SYS_IOCTL:
         return vfs_ioctl((int)r->rdi, r->rsi, (void *)r->rdx);
-    case SYS_GETPID:
-        return 1; /* the kernel shell acts as init (pid 1) */
+    case SYS_GETPID: {
+        struct task *cur = sched_current();
+        return cur != NULL ? (long)cur->pid : 1;
+    }
     case SYS_UPTIME:
         return (long)pit_uptime_ms();
     case SYS_SLEEP:

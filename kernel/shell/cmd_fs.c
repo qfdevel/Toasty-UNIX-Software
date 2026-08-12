@@ -14,6 +14,7 @@
 #include "../core/console.h"
 #include "../core/klib.h"
 #include "../elf/tus_elf.h"
+#include "../sched/sched.h"
 #include "../syscall/syscall.h"
 #include "../vfs/devices.h"
 #include "../vfs/vfs.h"
@@ -205,6 +206,16 @@ static int cmd_exec(int argc, char **argv) {
     return 0;
 }
 
+/* ---- ps: list tasks ---- */
+
+static int cmd_ps(int argc, char **argv) {
+    (void)argc;
+    (void)argv;
+    console_write("PID  STATE   NAME\n");
+    task_list_all();
+    return 0;
+}
+
 /* Command table additions, referenced from commands.c. */
 const struct shell_command g_fs_commands[] = {
     { "ls",      "list a directory",            cmd_ls },
@@ -217,6 +228,7 @@ const struct shell_command g_fs_commands[] = {
     { "sleep",   "wait N milliseconds",         cmd_sleep },
     { "fbfill",  "fill the framebuffer with a color", cmd_fbfill },
     { "exec",    "run a static ELF binary",     cmd_exec },
+    { "ps",      "list running tasks",          cmd_ps },
 };
 
 const size_t g_fs_command_count =

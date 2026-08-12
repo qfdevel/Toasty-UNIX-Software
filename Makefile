@@ -50,7 +50,7 @@ kernel.elf: $(KERNEL_OBJS) kernel/linker.ld
 $(TEST_ELF): $(TEST_ELF_SRC)
 	$(CC) -m64 -ffreestanding -fno-stack-protector -fno-pic \
 		-mno-red-zone -mgeneral-regs-only -O2 -c $(TEST_ELF_SRC) -o $(TEST_ELF_OBJ)
-	$(LD) -m elf_x86_64 -static -e _start -Ttext 0x400000 -o $@ $(TEST_ELF_OBJ)
+	$(LD) -m elf_x86_64 -static -e _start -Ttext 0x10000000 -o $@ $(TEST_ELF_OBJ)
 
 # ld -r -b binary turns a file into an object with symbols
 # _binary_<name>_start/_end; the kernel copies it into the VFS.

@@ -21,6 +21,7 @@
 #include "../mm/kmalloc.h"
 #include "../mm/pmm.h"
 #include "../mm/vmm.h"
+#include "../sched/sched.h"
 #include "../vfs/vfs.h"
 #include "tus_elf.h"
 
@@ -61,20 +62,23 @@ static void *tus_alloc(el_ctx *ctx, Elf_Addr phys, Elf_Addr virt,
     (void)ctx;
     (void)phys;
 
-    /* Map every 4 KiB page the segment touches with a fresh frame. */
+    /* Map every 4 KiB page the segment touches with a fresh frame.
+     * Pages are user-accessible (VMM_USER): the image runs in ring 3.
+     * If a page is already mapped (overlapping segments, or a mapping
+     * Limine left behind), keep its frame but re-map it with USER so
+     * ring 3 can actually execute it. */
     uint64_t first = virt & ~0xFFFull;
     uint64_t last = (virt + size + 0xFFF) & ~0xFFFull;
     for (uint64_t page = first; page < last; page += 0x1000) {
-        /* Segments may overlap (e.g. a page shared by two PT_LOADs);
-         * keep the first mapping in that case. */
-        if (vmm_translate(page) != 0) {
-            continue;
-        }
-        uint64_t frame = pmm_alloc_frame();
+        uint64_t frame = vmm_translate(page);
         if (frame == 0) {
-            return NULL;
+            frame = pmm_alloc_frame();
+            if (frame == 0) {
+                return NULL;
+            }
         }
-        if (vmm_map_page(page, frame, VMM_PRESENT | VMM_WRITE) != 0) {
+        if (vmm_map_page(page, frame & ~0xFFFull,
+                         VMM_PRESENT | VMM_WRITE | VMM_USER) != 0) {
             return NULL;
         }
     }
@@ -134,14 +138,16 @@ long elf_exec(const char *path) {
         return -ENOMEM;
     }
 
-    /* ET_EXEC images need no relocations: skip el_relocate(). */
-    void (*entry)(void) = (void (*)(void))(uintptr_t)ctx.ehdr.e_entry;
-    kprintf("exec: running %s, entry 0x%llx\n", path,
-            (unsigned long long)ctx.ehdr.e_entry);
-
-    entry();
-
-    kprintf("exec: %s returned\n", path);
-    vfs_close(g_elf_fd);
+    /* ET_EXEC images need no relocations: skip el_relocate().
+     * Spawn a ring-3 task that starts at the entry point; the
+     * scheduler runs it alongside the shell. */
+    int pid = task_create_user(ctx.ehdr.e_entry, path);
+    if (pid < 0) {
+        kprintf("exec: cannot create task for %s\n", path);
+        vfs_close(g_elf_fd);
+        return -ENOMEM;
+    }
+    kprintf("exec: %s started as pid %d (entry 0x%llx, ring 3)\n",
+            path, pid, (unsigned long long)ctx.ehdr.e_entry);
     return 0;
 }

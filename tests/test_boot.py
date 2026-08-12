@@ -250,13 +250,13 @@ def main():
         offset = wait_for("sub", offset=offset)
         ok("mkdir creates a directory")
 
-        # 12. ELF loader: run the embedded static binary
+        # 12. ELF loader: run the embedded static binary as a ring-3 task
         type_text(sock, "ls /boot\r")
         offset = wait_for("hello.elf", offset=offset)
         type_text(sock, "exec /boot/hello.elf\r")
+        offset = wait_for("started as pid", offset=offset)
         offset = wait_for("Hello from a static ELF", offset=offset)
-        offset = wait_for("returned", offset=offset)
-        ok("exec runs a static ELF image and returns to the shell")
+        ok("exec runs a static ELF image as a ring-3 task")
 
         # 13. scrollback: overflow the screen, PageUp shows older
         #     lines, PageDown returns to the exact live view.

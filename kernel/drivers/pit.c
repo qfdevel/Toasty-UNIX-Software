@@ -21,10 +21,8 @@
 
 static volatile uint64_t g_ticks;
 
-/* IRQ0 handler: advance the tick counter. Plain function, see
- * keyboard.c for the interrupt-attribute rule. */
-static void pit_irq_handler(struct interrupt_frame *frame) {
-    (void)frame;
+/* Advance the tick counter; called from the scheduler's IRQ0 path. */
+void pit_tick(void) {
     g_ticks++;
 }
 
@@ -34,7 +32,8 @@ void pit_init(void) {
     outb(PIT_CH0_DATA, (uint8_t)(DIVISOR_100HZ & 0xFF));
     outb(PIT_CH0_DATA, (uint8_t)((DIVISOR_100HZ >> 8) & 0xFF));
 
-    irq_install(PIT_IRQ, pit_irq_handler);
+    /* IRQ0 is wired to the scheduler (sched_tick_entry) in idt.c;
+     * here we only unmask the interrupt. */
     pic_enable_irq(PIT_IRQ);
 }
 

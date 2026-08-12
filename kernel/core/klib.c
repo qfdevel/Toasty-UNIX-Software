@@ -7,6 +7,7 @@
  */
 
 #include "klib.h"
+#include "../sched/sched.h"
 #include "console.h"
 
 /* ---- memory ---- */
@@ -271,7 +272,9 @@ void kvprintf(void (*out)(char), const char *fmt, va_list args) {
 
 void kprintf(const char *fmt, ...) {
     va_list args;
+    preempt_disable(); /* format walk + console write must be atomic */
     va_start(args, fmt);
     kvprintf(console_putchar, fmt, args);
     va_end(args);
+    preempt_enable();
 }

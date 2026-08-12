@@ -19,6 +19,8 @@
 #include "io.h"
 #include "core/console.h"
 #include "core/klib.h"
+#include "mm/vmm.h"
+#include "sched/sched.h"
 #include "syscall/syscall.h"
 
 /* 64-bit interrupt gate: present, DPL 0. IF is cleared on entry. */
@@ -38,13 +40,10 @@
 /* Vector used for POSIX system calls. */
 #define IDT_VECTOR_SYSCALL 0x80
 
-/* Code segment selector the kernel runs in. The Limine boot protocol
- * guarantees that the kernel is entered with CS = 0x28 (64-bit code)
- * and DS/ES/SS/FS/GS = 0x30 (64-bit data), so interrupt gates must
- * point back at 0x28 - NOT at 0x08, which is Limine's 32-bit compat
- * segment. An IDT entry with the wrong selector makes the CPU fetch
- * the handler through a 32-bit descriptor and triple-faults. */
-#define KERNEL_CODE_SELECTOR 0x28
+/* Code segment selector the kernel runs in. TUS installs its own GDT
+ * (gdt.c) where 0x08 is the 64-bit kernel code segment; interrupt
+ * gates must point back at 0x08. */
+#define KERNEL_CODE_SELECTOR 0x08
 
 struct idt_entry {
     uint16_t offset_low;   /* bits  0..15 of handler address */
@@ -100,6 +99,9 @@ static void exception_fatal(const struct interrupt_frame *frame,
         uint64_t cr2;
         __asm__ volatile("mov %%cr2, %0" : "=r"(cr2));
         kprintf("CR2     : 0x%llx\n", (unsigned long long)cr2);
+        kprintf("PTE     : 0x%llx (translate 0x%llx)\n",
+                (unsigned long long)vmm_pte(cr2),
+                (unsigned long long)vmm_translate(cr2));
     }
     kprintf("RIP    : 0x%llx\n", (unsigned long long)frame->rip);
     kprintf("CS     : 0x%llx\n", (unsigned long long)frame->cs);
@@ -233,6 +235,10 @@ void idt_init(void) {
     for (int vector = 0; vector < 256; vector++) {
         if (vector < 32) {
             idt_set_gate(vector, g_exception_stubs[vector]);
+        } else if (vector == 32) {
+            /* IRQ0 (PIT) is the scheduler tick: its stub performs the
+             * context switch, so it bypasses the generic IRQ path. */
+            idt_set_gate(vector, STUB_CAST(sched_tick_entry));
         } else if (vector < 48) {
             idt_set_gate(vector, g_irq_stubs[vector - 32]);
         } else {

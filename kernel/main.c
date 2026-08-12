@@ -13,6 +13,7 @@
 
 #include <limine.h>
 
+#include "arch/x86_64/gdt.h"
 #include "arch/x86_64/idt.h"
 #include "arch/x86_64/io.h"
 #include "arch/x86_64/pic.h"
@@ -26,6 +27,7 @@
 #include "mm/kmalloc.h"
 #include "mm/pmm.h"
 #include "mm/vmm.h"
+#include "sched/sched.h"
 #include "shell/tsh.h"
 #include "vfs/vfs.h"
 
@@ -142,6 +144,9 @@ void _start(void) {
     fill_bootinfo();
     console_init(g_bootinfo.framebuffer);
 
+    /* Own GDT (kernel + user segments + TSS) before any interrupt
+     * can fire; IDT selectors point at 0x08. */
+    gdt_init();
     idt_init();
     pic_init();
 
@@ -155,6 +160,10 @@ void _start(void) {
     kbd_init();
     vfs_init();
     elf_install_test_program();
+
+    /* The scheduler: tsh becomes task 0; the PIT (IRQ0) drives
+     * round-robin switching. */
+    sched_init();
 
     print_boot_banner();
 
