@@ -1,0 +1,8 @@
+# Build artifacts
+*.o
+kernel.elf
+tus.iso
+iso_root/
+
+# Logs
+*.log
