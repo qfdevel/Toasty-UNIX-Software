@@ -49,24 +49,79 @@ We use the **Limine bootloader** (v12.5.2 installed) because:
   as its first two arguments (per Limine C calling convention).
 - Limine maps the framebuffer into the higher-half kernel space for us.
 
-### 3.2 `limine.conf` (user-approved format)
+### 3.2 `limine.conf` (WORKING FORMAT — Limine 12.x)
 
 ```
-TIMEOUT=0
+timeout: 0
 
-:Toasty Unix Software (TUS)
-    PROTOCOL=limine
-    KERNEL_PATH=boot:///kernel.elf
+# Mirror the boot log and menu to the serial port (COM1) for debugging.
+SERIAL: yes
+
+/Toasty Unix Software (TUS)
+    protocol: limine
+    kernel_path: boot():/boot/kernel.elf
 ```
 
-Notes:
+> **IMPORTANT**: The syntax shown in the original request
+> (`TIMEOUT=0`, `PROTOCOL=limine`, `KERNEL_PATH=boot:///kernel.elf`,
+> entry starting with `:`) is Limine **5.x** style and is **rejected by
+> Limine 12.x** (`[config file contains no valid entries]`). The 12.x
+> equivalents are: `timeout: 0`, entry names starting with **`/`**,
+> `protocol: limine`, `kernel_path: boot():/boot/kernel.elf`.
 
-- `TIMEOUT=0` → boots immediately, no menu wait.
-- Entry name: `Toasty Unix Software (TUS)`.
-- `PROTOCOL=limine` → the native Limine boot protocol (not multiboot2).
-- `KERNEL_PATH=boot:///kernel.elf` → kernel lives at ISO root `/boot/kernel.elf`.
+### 3.3 Kernel entry state (from the Limine boot protocol spec)
 
-## 4. Toolchain Status (verified 2026-08-12)
+- The kernel is entered via an `iretq` frame with **CS = 0x28** and
+  **DS/ES/SS/FS/GS = 0x30** (flat 64-bit code/data descriptors set up
+  by Limine). This is a **guaranteed part of the protocol**.
+- **Consequence for the IDT**: every interrupt gate must use selector
+  **0x28**. Selector 0x08 is Limine's 32-bit compat segment — using it
+  makes the CPU execute handlers as 32-bit code → #GP → double fault →
+  triple fault (instant CPU reset, looks like the VM "shut down").
+- Limine maps the kernel ELF at its linked higher-half addresses, sets
+  up a stack (≥16 KiB), and fills in every `.requests` struct.
+
+## 4. Kernel state (v0.1.0 — working, 2026-08-12)
+
+Boots from the ISO in QEMU (BIOS), serial + framebuffer console,
+interrupt-driven PS/2 keyboard, and an interactive `tsh`. Verified by
+`make test` (10/10 automated checks) and a manual session:
+
+```
+TUS> about
+Toasty Unix Software (TUS)
+"Work everywhere, but work right."
+Architecture: x86_64 (AMD64)
+Bootloader  : Limine 12.5.2
+TUS> sysinfo
+CPU vendor  : AuthenticAMD
+CPU model   : QEMU Virtual CPU version 2.5+
+Memory      : 510 MiB usable
+Framebuffer : 1280x800, 32 bpp, pitch 5120 @ 0xffff8000fd000000
+```
+
+## 5. Hard-won lessons (read before touching the kernel)
+
+1. **IDT selector must be 0x28** (the protocol's CS), never 0x08.
+   Wrong selector = triple fault on the very first interrupt.
+2. **Registered IRQ handlers are plain C functions.** Only the IDT
+   stubs in idt.c carry `__attribute__((interrupt))`. A handler that
+   returns with IRETQ instead of RET pops garbage → #GP.
+3. **GCC flags for a higher-half kernel**: `-mcmodel=kernel` (avoids
+   32-bit relocations against rodata), `-mno-red-zone`,
+   `-mgeneral-regs-only`, `-fno-pic`, `-ffreestanding`.
+4. **QEMU sendkey timing**: PS/2 buffers are small (16 bytes); typing
+   faster than ~100 ms/key drops scancodes (Enter gets lost, words
+   concatenate). The automated test uses 30–50 ms gaps only because
+   it sends short strings.
+5. **limine.conf is 12.x syntax** (see §3.2); `SERIAL: yes` is
+   invaluable for debugging (Limine mirrors its log to COM1).
+6. **Orphan `.requests` section must be kept** in the linker script
+   (`KEEP(*(.requests))`); base revision is found via the symbol
+   `limine_base_revision`, declared as
+   `static volatile uint64_t limine_base_revision[3] = LIMINE_BASE_REVISION(2);`.
+
+## 6. Toolchain Status (verified 2026-08-12)
 
 All required tools are installed on this Arch Linux machine:
 
@@ -143,18 +198,21 @@ Design principles:
 - Name backups clearly: `TOS-backup-YYYYMMDD-HHMM.tar.gz`.
 - If a test/demo makes a mess → restore from backup, never hand-patch chaos.
 
-## 9. Roadmap / Status
+## 10. Roadmap / Status
 
 | Phase | Item | Status |
 |-------|------|--------|
 | 0 | Spec & notes saved (TUS.md) | ✅ done |
-| 1 | Repo scaffold: Makefile, linker, entry.asm, limine.conf, ISO script | ⏳ pending — start on user command |
-| 2 | Boot: Limine → long mode → hello world (serial + framebuffer) | ⏳ |
-| 3 | `/dev/fb0` framebuffer device (write + draw) | ⏳ |
-| 4 | GDT/IDT, interrupts, PIT timer | ⏳ |
-| 5 | Memory: physical allocator + paging (higher half) | ⏳ |
-| 6 | Serial/kbd drivers, minimal VFS, syscalls | ⏳ |
-| 7 | Userspace: TUS shell, init process | ⏳ |
+| 1 | Repo scaffold: Makefile, linker, limine.conf, ISO script | ✅ done |
+| 2 | Boot: Limine → long mode → serial + framebuffer console | ✅ done |
+| 3 | IDT/PIC, exceptions with register dump | ✅ done |
+| 4 | PS/2 keyboard driver (IRQ1, Shift/Caps/Ctrl) | ✅ done |
+| 5 | **tsh** — TUS shell with 8 built-in commands | ✅ done |
+| 6 | Automated test suite (tests/test_boot.py, 10/10) | ✅ done |
+| 7 | Physical memory manager + higher-half paging | ⏳ |
+| 8 | PIT timer, scheduler | ⏳ |
+| 9 | VFS + `/dev/fb0` framebuffer device | ⏳ |
+| 10 | Userspace: init, userspace tsh | ⏳ |
 | ... | (expand as we go) | |
 
 ---
