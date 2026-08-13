@@ -2,6 +2,10 @@
 
 *"Work everywhere, but work right."*
 
+<img width="713" height="789" alt="tus" src="https://github.com/user-attachments/assets/f03ba14a-8b01-4714-bae9-363c47f29ded" />
+
+
+
 TUS is a UNIX-like operating system for the AMD64 (x86-64) architecture,
 built with the [Limine](https://limine-bootloader.org) bootloader. It
 targets every 64-bit machine, with a modular, clean and well-documented
@@ -166,10 +170,10 @@ uptime
 kilo /kilo.txt          # bare name -> /bin/kilo
 grep -i toast /etc/motd
 sed s/TUS/Toasty/ /etc/motd
-useradd -m -s /bin/tsh ahmet
-passwd ahmet
-doas useradd -m veli    # privilege elevation via /etc/doas.conf
-login ahmet
+useradd -m -s /bin/tsh john
+passwd john
+doas useradd -m john    # privilege elevation via /etc/doas.conf
+login john
 ```
 
 Automated headless test (boots with 4 CPUs, types into the virtual
