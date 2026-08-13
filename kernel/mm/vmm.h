@@ -26,8 +26,37 @@
 /* Initialize: record the active page tables (CR3). */
 void vmm_init(void);
 
-/* Map a single 4 KiB page. `virt` must be page aligned.
- * Returns 0 on success, -1 on failure. */
+/* Physical address of the boot (root) address space - the one the
+ * kernel shell runs in. All per-task spaces clone its kernel half. */
+uint64_t vmm_root_cr3(void);
+
+/* Allocate a fresh address space: a new PML4 whose kernel half
+ * (indices 256..511) is copied from the root space, so every task
+ * sees the same kernel mappings. The user half starts empty.
+ * Returns the new CR3, or 0 on failure. */
+uint64_t vmm_space_clone(void);
+
+/* Make `cr3` the active address space (g_cr3 + CR3 reload, which
+ * also flushes the TLB). The caller must be in a context where the
+ * current kernel stack is mapped in the new space (always true:
+ * kernel stacks live in the shared kernel heap). */
+void vmm_space_switch(uint64_t cr3);
+
+/* Map a single 4 KiB page into an explicit address space.
+ * `virt` must be page aligned. Returns 0 on success, -1 on failure. */
+int vmm_map_page_in(uint64_t cr3, uint64_t virt, uint64_t phys,
+                    uint64_t flags);
+
+/* Ensure the intermediate page tables for [virt, virt+bytes) exist
+ * in the root space (no frames mapped). Call before any task can
+ * exist, so later runtime mappings only touch shared leaf tables
+ * and every address space always sees them. */
+void vmm_reserve_tables(uint64_t virt, size_t bytes);
+
+/* Map a single 4 KiB page in the CURRENT address space. Kernel-half
+ * addresses (>= 0xffff800000000000) are mapped in the root space
+ * instead: the kernel half is shared by reference, and mapping there
+ * keeps every task's view consistent. Returns 0 or -1. */
 int vmm_map_page(uint64_t virt, uint64_t phys, uint64_t flags);
 
 /* Map `bytes` (page aligned) of physical memory at `virt`. */
@@ -36,8 +65,11 @@ int vmm_map_region(uint64_t virt, uint64_t phys, size_t bytes, uint64_t flags);
 /* Unmap a single page (PTE cleared, TLB flushed). */
 void vmm_unmap_page(uint64_t virt);
 
-/* Translate a virtual address; returns 0 if unmapped. */
+/* Translate a virtual address in the current space; 0 if unmapped. */
 uint64_t vmm_translate(uint64_t virt);
+
+/* Translate a virtual address in an explicit space; 0 if unmapped. */
+uint64_t vmm_translate_in(uint64_t cr3, uint64_t virt);
 
 /* Return the raw page-table entry for a virtual address (0 if any
  * level is unmapped). Debug helper. */

@@ -14,6 +14,10 @@
  *       -o hello.elf hello.o
  */
 
+/* TUS syscall wrapper. The kernel stub does NOT restore the argument
+ * registers (only RAX comes back), so every register is declared
+ * read-write ("+r") - GCC must assume they are clobbered and reload
+ * them before each call (see TUS.md lesson 7). */
 static long tus_syscall(long number, long a1, long a2, long a3,
                         long a4, long a5) {
     long ret;
@@ -24,9 +28,9 @@ static long tus_syscall(long number, long a1, long a2, long a3,
     register long rsi __asm__("rsi") = a2;
     register long rdx __asm__("rdx") = a3;
     __asm__ volatile("int $0x80"
-                     : "=a"(ret)
-                     : "a"(number), "r"(rdi), "r"(rsi), "r"(rdx),
-                       "r"(r10), "r"(r8), "r"(r9)
+                     : "=a"(ret), "+r"(rdi), "+r"(rsi), "+r"(rdx),
+                       "+r"(r10), "+r"(r8), "+r"(r9)
+                     : "a"(number)
                      : "rcx", "r11", "memory");
     return ret;
 }

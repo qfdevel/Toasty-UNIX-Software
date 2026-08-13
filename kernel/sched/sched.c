@@ -38,11 +38,11 @@
 #define STACK_SIZE 16384   /* 16 KiB kernel and user stacks */
 #define FRAME_WORDS 14     /* 9 caller-saved + 5 IRETQ fields */
 
-/* Virtual address where user stacks live. Each task gets its own
- * 1 MiB slot so stacks never collide; pages are mapped with VMM_USER
- * (the kernel heap is supervisor-only and ring 3 must not touch it). */
+/* Virtual address where user stacks live. Each task has its own
+ * address space, so every task can use the same stack address; the
+ * pages are mapped with VMM_USER in the task's private space (the
+ * kernel heap is supervisor-only and ring 3 must not touch it). */
 #define USER_STACK_BASE 0x60000000ull
-#define USER_STACK_SLOT (1ull << 20)
 
 static struct task g_tasks[TASK_MAX];
 static struct task *g_current;
@@ -92,7 +92,8 @@ void task_list_all(void) {
         const char *state = t->state == TASK_RUNNING ? "running"
                           : t->state == TASK_READY  ? "ready"
                           : "zombie";
-        kprintf("%-4u %-8s %s\n", t->pid, state, t->name);
+        kprintf("%-4u %-8s %-10llx %s\n", t->pid, state,
+                (unsigned long long)t->cr3, t->name);
     }
 }
 
@@ -101,6 +102,8 @@ void sched_init(void) {
     g_current->pid = g_next_pid++;
     g_current->state = TASK_RUNNING;
     strcpy(g_current->name, "tsh");
+    /* Task 0 is the kernel shell: it keeps the boot address space. */
+    g_current->cr3 = vmm_root_cr3();
     /* Task 0 runs on the boot stack; give it a real kernel stack so
      * TSS.RSP0 is always valid. */
     g_current->kstack = (uint64_t)(uintptr_t)kmalloc(STACK_SIZE);
@@ -109,7 +112,7 @@ void sched_init(void) {
     tss_set_rsp0(g_current->kstack_top);
 }
 
-int task_create_user(uint64_t entry, const char *name) {
+int task_create_user(uint64_t entry, const char *name, uint64_t cr3) {
     struct task *t = task_find_slot();
     if (t == NULL) {
         return -1;
@@ -120,18 +123,18 @@ int task_create_user(uint64_t entry, const char *name) {
         return -1;
     }
 
-    /* Map a fresh user stack: ring 3 needs USER pages; the kernel
-     * heap is supervisor-only. Each task gets a private slot. */
-    uint64_t ustack = USER_STACK_BASE +
-                      (uint64_t)(t - g_tasks) * USER_STACK_SLOT;
+    /* Map a fresh user stack inside the task's private address space:
+     * ring 3 needs USER pages there. The kernel heap (where this
+     * code runs) is supervisor-only. */
+    uint64_t ustack = USER_STACK_BASE;
     uint64_t pages = STACK_SIZE / 4096;
     for (uint64_t i = 0; i < pages; i++) {
         uint64_t frame = pmm_alloc_frame();
         if (frame == 0) {
             return -1;
         }
-        if (vmm_map_page(ustack + i * 4096, frame,
-                         VMM_PRESENT | VMM_WRITE | VMM_USER) != 0) {
+        if (vmm_map_page_in(cr3, ustack + i * 4096, frame,
+                            VMM_PRESENT | VMM_WRITE | VMM_USER) != 0) {
             return -1;
         }
     }
@@ -145,6 +148,7 @@ int task_create_user(uint64_t entry, const char *name) {
     t->kstack_top = t->kstack + STACK_SIZE;
     t->ustack = ustack;
     t->ustack_top = ustack + STACK_SIZE;
+    t->cr3 = cr3;
 
     /* Build the fake interrupt frame at the top of the kernel stack.
      * Layout (lowest first, matching what the CPU pushes on a
@@ -242,6 +246,10 @@ uint64_t sched_tick(uint64_t frame_rsp) {
     g_current->state = TASK_READY;
     next->state = TASK_RUNNING;
     tss_set_rsp0(next->kstack_top);
+    /* Load the next task's address space. This is safe here: the
+     * kernel stack and all kernel data are mapped in every space via
+     * the shared kernel half. The CR3 reload also flushes the TLB. */
+    vmm_space_switch(next->cr3);
     g_current = next;
     return next->rsp;
 }
@@ -269,6 +277,9 @@ void task_exit(int status) {
 
     next->state = TASK_RUNNING;
     tss_set_rsp0(next->kstack_top);
+    /* Same address-space switch as in sched_tick: the iretq below
+     * resumes the next task inside its own space. */
+    vmm_space_switch(next->cr3);
     g_current = next;
 
     /* Switch to the next task's frame without returning. */

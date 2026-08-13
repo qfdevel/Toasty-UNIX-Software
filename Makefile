@@ -27,15 +27,13 @@ KERNEL_SRCS := $(shell find kernel -name '*.c')
 KERNEL_OBJS := $(KERNEL_SRCS:.c=.o)
 DEPS        := $(KERNEL_OBJS:.o=.d)
 
-# Embedded test program for the ELF loader: tests/hello.elf is
-# converted to an object file (binary blob) and linked into the
-# kernel, then exposed at /boot/hello.elf in the VFS.
-TEST_ELF_SRC := tests/hello.c
-TEST_ELF     := tests/hello.elf
-TEST_ELF_OBJ := tests/hello.o
-TEST_ELF_BLOB := tests/hello_blob.o
+# Embedded test programs for the ELF loader: tests/hello.elf and
+# tests/enforce.elf are converted to object files (binary blobs) and
+# linked into the kernel, then exposed at /boot/ in the VFS.
+TEST_ELFS := tests/hello.elf tests/enforce.elf
+TEST_ELF_BLOBS := $(TEST_ELFS:.elf=_blob.o)
 
-KERNEL_OBJS += $(TEST_ELF_BLOB)
+KERNEL_OBJS += $(TEST_ELF_BLOBS)
 
 .PHONY: all iso run test clean
 
@@ -47,15 +45,17 @@ kernel.elf: $(KERNEL_OBJS) kernel/linker.ld
 %.o: %.c
 	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
 
-$(TEST_ELF): $(TEST_ELF_SRC)
+# Each test ELF: freestanding static x86-64 image linked at
+# 0x10000000 (the user half). Entry point is _start.
+tests/%.elf: tests/%.c
 	$(CC) -m64 -ffreestanding -fno-stack-protector -fno-pic \
-		-mno-red-zone -mgeneral-regs-only -O2 -c $(TEST_ELF_SRC) -o $(TEST_ELF_OBJ)
-	$(LD) -m elf_x86_64 -static -e _start -Ttext 0x10000000 -o $@ $(TEST_ELF_OBJ)
+		-mno-red-zone -mgeneral-regs-only -O2 -c $< -o $*.o
+	$(LD) -m elf_x86_64 -static -e _start -Ttext 0x10000000 -o $@ $*.o
 
 # ld -r -b binary turns a file into an object with symbols
 # _binary_<name>_start/_end; the kernel copies it into the VFS.
-$(TEST_ELF_BLOB): $(TEST_ELF)
-	$(LD) -r -b binary $(TEST_ELF) -o $@
+$(TEST_ELF_BLOBS): %_blob.o: %.elf
+	$(LD) -r -b binary $< -o $@
 
 # Header dependency tracking: rebuild objects when the headers they
 # include change (without this, editing a .h silently tests a stale
@@ -85,4 +85,5 @@ test: iso
 	python3 tests/test_boot.py
 
 clean:
-	rm -rf $(KERNEL_OBJS) $(DEPS) kernel.elf tus.iso iso_root $(TEST_ELF) $(TEST_ELF_OBJ)
+	rm -rf $(KERNEL_OBJS) $(DEPS) kernel.elf tus.iso iso_root \
+		$(TEST_ELFS) tests/hello.o tests/enforce.o

@@ -46,6 +46,14 @@ void kmalloc_init(void) {
     g_free = NULL;
     g_arena_next = VMM_KHEAP_BASE;
     g_arena_bytes = 0;
+
+    /* Pre-create the intermediate page tables for the whole heap
+     * region in the root space. This runs before any user task can
+     * exist; afterwards, growing the heap only writes shared leaf
+     * PTEs, which every per-task address space sees. (Without this,
+     * a table allocation triggered while a task's space is active
+     * could end up private to that space and the heap would break.) */
+    vmm_reserve_tables(VMM_KHEAP_BASE, VMM_KHEAP_SIZE);
 }
 
 /* Map one more 4 KiB frame and add it to the free list. */

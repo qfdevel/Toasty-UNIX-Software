@@ -211,7 +211,7 @@ static int cmd_exec(int argc, char **argv) {
 static int cmd_ps(int argc, char **argv) {
     (void)argc;
     (void)argv;
-    console_write("PID  STATE   NAME\n");
+    console_write("PID  STATE   CR3       NAME\n");
     task_list_all();
     return 0;
 }

@@ -195,9 +195,9 @@ def main():
         offset = wait_for("hi", offset=offset)
         ok("echo prints its arguments")
 
-        # 3. ver (0.2.0 now)
+        # 3. ver (0.4.0 now)
         type_text(sock, "ver\r")
-        offset = wait_for("TUS kernel 0.2.0", offset=offset)
+        offset = wait_for("TUS kernel 0.4.0", offset=offset)
         ok("ver reports the kernel version")
 
         # 4. sysinfo (now with PMM stats and uptime)
@@ -257,6 +257,29 @@ def main():
         offset = wait_for("started as pid", offset=offset)
         offset = wait_for("Hello from a static ELF", offset=offset)
         ok("exec runs a static ELF image as a ring-3 task")
+
+        # 12b. Address-space isolation: a second instance loads at the
+        #      SAME link address (0x10000000) in its own private
+        #      address space. With per-task CR3 this works; a shared
+        #      address space would collide on the second load.
+        type_text(sock, "exec /boot/hello.elf\r")
+        offset = wait_for("started as pid", offset=offset)
+        offset = wait_for("Hello from a static ELF", offset=offset)
+        ok("second exec runs at the same link address (per-task address space)")
+
+        # 12c. ps shows every task with its own address space (CR3).
+        type_text(sock, "ps\r")
+        offset = wait_for("CR3", offset=offset)
+        offset = wait_for("tsh", offset=offset)
+        ok("ps lists tasks with per-task address spaces")
+
+        # 12d. Ring-3 enforcement: a user program passing a KERNEL
+        #      address as a write() buffer must get -EFAULT (-14),
+        #      never a write into kernel memory.
+        type_text(sock, "exec /boot/enforce.elf\r")
+        offset = wait_for("started as pid", offset=offset)
+        offset = wait_for("-14", offset=offset)
+        ok("ring-3 syscall rejects kernel pointers with -EFAULT")
 
         # 13. scrollback: overflow the screen, PageUp shows older
         #     lines, PageDown returns to the exact live view.

@@ -40,6 +40,11 @@ struct task {
     uint64_t ustack;
     uint64_t ustack_top;
 
+    /* Per-task address space (physical PML4). Tasks created by
+     * task_create_user() run in their own space; the kernel half is
+     * shared with the root space, the user half is private. */
+    uint64_t cr3;
+
     int exit_status;
 };
 
@@ -53,9 +58,11 @@ void sched_tick_entry(void);
  * saved registers. Returns the RSP to switch to, or 0 to continue. */
 uint64_t sched_tick(uint64_t frame_rsp);
 
-/* Create a ring-3 task that starts executing `entry` on a fresh user
- * stack. Returns the new PID or -1 on failure. */
-int task_create_user(uint64_t entry, const char *name);
+/* Create a ring-3 task that starts executing `entry` in the address
+ * space `cr3` (see vmm_space_clone). The user stack is mapped inside
+ * that space, and the fake interrupt frame is pre-built so the first
+ * switch IRETQs straight into ring 3. Returns the new PID or -1. */
+int task_create_user(uint64_t entry, const char *name, uint64_t cr3);
 
 /* Current task; NULL before sched_init(). */
 struct task *sched_current(void);

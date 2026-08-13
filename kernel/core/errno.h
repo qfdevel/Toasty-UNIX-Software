@@ -12,6 +12,7 @@
 #define ENOENT  2  /* no such file or directory */
 #define EIO     5  /* I/O error */
 #define EBADF   9  /* bad file descriptor */
+#define EFAULT  14 /* bad address (user pointer outside user space) */
 #define EAGAIN  11 /* resource temporarily unavailable */
 #define ENOMEM  12 /* out of memory */
 #define EEXIST  17 /* file exists */

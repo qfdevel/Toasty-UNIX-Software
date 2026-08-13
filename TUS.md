@@ -81,14 +81,54 @@ SERIAL: yes
 - Limine maps the kernel ELF at its linked higher-half addresses, sets
   up a stack (≥16 KiB), and fills in every `.requests` struct.
 
-## 4. Kernel state (v0.2.0 — working, 2026-08-13)
+## 4. Kernel state (v0.4.0 — working, 2026-08-13)
 
-v0.2.0 adds the Phase 2 milestone: memory management, timing, the
+v0.4.0 adds **per-task address spaces** and **ring-3 syscall
+enforcement**: every user task runs in its own page tables, the
+scheduler switches CR3 together with the task, and user callers may
+only pass pointers into the user half. Verified by `make test`
+(21/21 automated checks).
+
+### 4.0 v0.4.0 components
+
+- **Per-task address spaces** (`kernel/mm/vmm.c`): `vmm_space_clone()`
+  allocates a fresh PML4 whose kernel half (indices 256..511) is
+  copied from the root space *by reference* — all tasks share the
+  kernel image, HHDM, framebuffer and heap. The user half starts
+  empty and is private per task, so several tasks can use the same
+  link address (the boot test runs two instances of hello.elf, both
+  at 0x10000000, with different CR3s). `vmm_space_switch()` changes
+  g_cr3 and reloads CR3 (also flushing the TLB); `sched_tick` and
+  `task_exit` call it on every task switch.
+- **Kernel-half routing**: `vmm_map_page` maps kernel-half addresses
+  (>= 0xffff800000000000) in the ROOT tables, user-half addresses in
+  the current space. Because the kernel half is shared by reference,
+  a kernel mapping is visible from every space. `vmm_reserve_tables`
+  pre-creates the heap region's intermediate tables at boot (before
+  any task exists), so runtime heap growth only touches shared leaf
+  PTEs.
+- **ELF loading in a private space** (`kernel/elf/tus_elf.c`):
+  `elf_exec` clones a space, switches CR3 to it (preemption
+  disabled) so `el_load`'s segment writes land in the right tables,
+  spawns the task, and switches back. The task struct stores its
+  cr3; `ps` shows it (PID/STATE/CR3/NAME).
+- **Ring-3 syscall enforcement** (`kernel/syscall/syscall.c`): the
+  syscall stub reads the caller's CS from the interrupt frame and
+  passes it to the dispatcher; user callers are limited to canonical
+  user-half pointers (`access_ok`), anything else returns -EFAULT
+  (-14). The kernel shell (ring 0) is exempt. Proven by the embedded
+  `enforce.elf` test image, which passes a kernel address to write()
+  and prints the -14 it gets back.
+
+### 4.1 Earlier phases (v0.2.0 / v0.3.0, archived)
+
+v0.2.0 added the Phase 2 milestone: memory management, timing, the
 virtual file system with device nodes, and a POSIX-style syscall ABI
-that tsh itself uses. All of it is verified by `make test` (16/16
+that tsh itself uses. v0.3.0 added the round-robin scheduler and
+ring-3 user tasks. All of it is verified by `make test` (21/21
 automated checks).
 
-### 4.1 Phase 2 components
+### 4.1a v0.2.0 components
 
 - **PMM** (`kernel/mm/pmm.c`): bitmap frame allocator over the Limine
   memory map. Only `LIMINE_MEMMAP_USABLE` frames are allocated; the
@@ -211,6 +251,34 @@ interrupt-driven PS/2 keyboard, and an interactive `tsh`. Verified by
     console/scrollback code add lines to the live screen and history,
     skewing pixel-count tests. Remove debug prints before testing
     screen content.
+14. **Kernel-half mappings must go to the root space, and the heap's
+    page tables must be reserved before any task exists.** With
+    per-task spaces, a table allocation (or a 1 GiB large-page split)
+    performed in a task's space updates that task's PML4 only —
+    other tasks keep the old entry and silently miss the mapping.
+    Routing kernel-half maps to the root tables + reserving the heap
+    tables at boot (vmm_reserve_tables) means runtime heap growth
+    only writes shared leaf PTEs, visible to every space.
+15. **Debug prints in the PIT tick handler can starve ring-3 tasks**:
+    kprintf of a switch line takes longer than the PIT period in TCG,
+    so a new PIT pulse goes pending while IF=0; the iretq into the
+    freshly-switched task immediately delivers the pending IRQ0
+    before the first user instruction — the task's saved RIP never
+    moves past the entry point. Symptom: task "runs" (ticks switch
+    to it) but never executes anything. Remove the debug prints.
+16. **The syscall stub only returns RAX; all other registers are
+    clobbered** (see lesson 7). User programs must declare every
+    argument register "+r" in the asm, or GCC assumes they are
+    preserved and the compiled code silently uses kernel-garbage
+    values after the call (enforce.elf's first version computed a
+    buffer pointer from the clobbered RDI and wrote to a garbage
+    address → #PF in ring 3).
+17. **The caller's CS lives at a fixed offset in the syscall frame**
+    (%rsp+64 after the 7 register pushes, for both ring-3 and ring-0
+    callers) — do NOT copy it into the register struct: offset 56 is
+    the CPU-pushed RIP slot, and writing there makes iretq jump to
+    the CS value (0x8) → #PF at address 8. Pass it as a separate
+    argument instead.
 
 ## 6. Toolchain Status (verified 2026-08-12)
 
@@ -306,8 +374,10 @@ Design principles:
 | 10 | POSIX syscall ABI (int $0x80, 12 syscalls, dogfooded by tsh) | ✅ done (v0.2.0) |
 | 11 | Automated test suite extended (16/16) | ✅ done (v0.2.0) |
 | 12 | ELF loader: run static (ET_EXEC) images (`exec` in tsh) | ✅ done (v0.2.1) |
-| 13 | Userspace: init, userspace tsh | ⏳ |
-| 14 | Scheduler + ring-3 enforcement of syscalls | ⏳ |
+| 13 | Scheduler: round-robin preemptive multitasking | ✅ done (v0.3.0) |
+| 14 | Ring 3: user-mode ELF tasks (exec, ps) | ✅ done (v0.3.0) |
+| 16 | Per-task address spaces + syscall ring-3 enforcement | ✅ done (v0.4.0) |
+| 15 | Userspace: init, userspace tsh | ⏳ |
 | 15 | Physical disk driver + real filesystem | ⏳ |
 | ... | (expand as we go) | |
 
