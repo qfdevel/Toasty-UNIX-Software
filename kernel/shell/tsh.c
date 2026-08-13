@@ -10,6 +10,8 @@
 #include "commands.h"
 #include "../core/console.h"
 #include "../drivers/keyboard.h"
+#include "../sched/sched.h"
+#include "../vfs/devices.h"
 
 /* TUS palette */
 #define COLOR_FG     0x00E8E8E8 /* near-white text */
@@ -41,15 +43,26 @@ void tsh_run(void) {
     tsh_prompt();
 
     for (;;) {
-        struct kbd_event ev = kbd_get_event();
+        /* A foreground user task (kilo and friends) owns the console
+         * keyboard while it runs; kbd_get_event_owned() yields until
+         * ownership comes back (the owner releases it in task_exit). */
+        struct task *me = sched_current();
+        long pid = me != NULL ? me->pid : 1;
+        struct kbd_event ev = kbd_get_event_shell(pid);
 
         /* PageUp/PageDown navigate the framebuffer scrollback. */
-        if (ev.type == KBD_EVENT_SCROLL_UP) {
-            console_scroll_page(1);
-            continue;
+        if (ev.type == KBD_EVENT_SPECIAL) {
+            if (ev.code == KBD_KEY_PAGE_UP) {
+                console_scroll_page(1);
+                continue;
+            }
+            if (ev.code == KBD_KEY_PAGE_DOWN) {
+                console_scroll_page(-1);
+                continue;
+            }
+            continue; /* other special keys are ignored by the shell */
         }
-        if (ev.type == KBD_EVENT_SCROLL_DOWN) {
-            console_scroll_page(-1);
+        if (ev.type != KBD_EVENT_CHAR) {
             continue;
         }
 

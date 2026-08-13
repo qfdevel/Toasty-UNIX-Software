@@ -326,6 +326,41 @@ static long file_write(struct vfs_file *f, const void *buf, size_t count) {
     return (long)count;
 }
 
+long vfs_ftruncate(long fd, long length) {
+    struct vfs_file *f = fd_get(fd);
+    if (f == NULL || f->node->type != VFS_FILE) {
+        return -EBADF;
+    }
+    if (length < 0) {
+        return -EINVAL;
+    }
+    struct vfs_node *node = f->node;
+    if ((size_t)length < node->size) {
+        node->size = (size_t)length;
+        return 0;
+    }
+    /* Growing: extend with zero bytes (kilo truncates to the new
+     * length, then rewrites the whole file from offset 0). */
+    size_t need = (size_t)length;
+    if (need > node->capacity) {
+        size_t newcap = node->capacity ? node->capacity : 64;
+        while (newcap < need) {
+            newcap *= 2;
+        }
+        uint8_t *fresh = krealloc(node->data, newcap);
+        if (fresh == NULL) {
+            return -ENOMEM;
+        }
+        node->data = fresh;
+        node->capacity = newcap;
+    }
+    if (need > node->size) {
+        memset(node->data + node->size, 0, need - node->size);
+        node->size = need;
+    }
+    return 0;
+}
+
 long vfs_read(long fd, void *buf, size_t count) {
     struct vfs_file *f = fd_get(fd);
     if (f == NULL) {

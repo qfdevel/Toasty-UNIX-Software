@@ -10,7 +10,7 @@
 
 /* Load the static ELF at `path` and jump to its entry point.
  * Returns 0 on success, a negative errno otherwise. */
-long elf_exec(const char *path);
+long elf_exec(const char *path, int argc, char **argv);
 
 /* Install the embedded test binary (tests/hello.elf) into the VFS
  * at /boot/hello.elf. Called once after vfs_init(). */

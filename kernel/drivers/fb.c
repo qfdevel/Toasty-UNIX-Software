@@ -65,6 +65,368 @@ static int g_palette_count;
 
 static struct fb_cell g_text[FB_MAX_ROWS][FB_MAX_COLS];
 
+/* Forward declarations: the helpers live below, the ANSI engine
+ * (inserted right after the globals) calls them. */
+static uint8_t palette_lookup(uint32_t fg, uint32_t bg);
+static void fb_paint_cell(int row, int col, const struct fb_cell *cell,
+                          bool show_cursor);
+static void fb_draw_cell(int row, int col, bool show_cursor);
+static void fb_redraw_live(void);
+
+/* ---- ANSI/VT100 escape sequence state ----
+ *
+ * The console understands the subset of ECMA-48 / VT100 sequences a
+ * full-screen terminal application (kilo) needs: CUP cursor
+ * positioning (H/f), relative moves (A/B/C/D), erase display/line
+ * (J/K/X), SGR colours (m, incl. reverse video 7 and the 30-37 /
+ * 90-97 / 40-47 / 100-107 colour sets), cursor visibility (?25h/l)
+ * and the alternate screen (?1049h/l, ?47h/l). Unknown sequences are
+ * consumed and ignored so a misbehaving application can never wedge
+ * the parser.
+ */
+
+enum {
+    ANSI_NORMAL = 0,
+    ANSI_ESC,   /* got ESC, waiting for '[' or 'O' */
+    ANSI_CSI,   /* inside a control sequence, accumulating parameters */
+    ANSI_SS3,   /* ESC O ... single-shift (e.g. ESC O H = Home) */
+};
+
+static int g_ansi_state = ANSI_NORMAL;
+static char g_csi_buf[32];
+static int g_csi_len;
+static bool g_csi_private;   /* '?' prefix: private (DEC) mode */
+static bool g_cursor_visible = true;
+static bool g_reverse;       /* SGR 7: swap fg/bg at write time */
+
+/* Alternate screen storage (ESC[?1049h / ESC[?47h). */
+static struct fb_cell g_alt_text[FB_MAX_ROWS][FB_MAX_COLS];
+static int g_alt_cursor_x, g_alt_cursor_y;
+static uint32_t g_alt_fg, g_alt_bg;
+static uint8_t g_alt_cur_color;
+static bool g_alt_active;
+
+/* The 16 standard ANSI colours (VGA palette, bright variants in the
+ * second half). SGR 30-37 / 90-97 select the foreground, 40-47 /
+ * 100-107 the background. */
+static const uint32_t ansi_colors[16] = {
+    0x000000, 0xAA0000, 0x00AA00, 0xAA5500,
+    0x0000AA, 0xAA00AA, 0x00AAAA, 0xAAAAAA,
+    0x555555, 0xFF5555, 0x55FF55, 0xFFFF55,
+    0x5555FF, 0xFF55FF, 0x55FFFF, 0xFFFFFF,
+};
+
+/* Recompute the palette index for the current (fg,bg,reverse) state.
+ * Reverse video stores the swapped pair so later redraws (scroll,
+ * cursor blink) reproduce the inversion without per-cell flags. */
+static void fb_update_color(void) {
+    if (g_reverse) {
+        g_cur_color = palette_lookup(g_bg, g_fg);
+    } else {
+        g_cur_color = palette_lookup(g_fg, g_bg);
+    }
+}
+
+/* Erase the live cursor cell (before it moves) and repaint the cell
+ * at (x,y) with the inverted cursor if it is visible. */
+static void fb_repaint_cursor(void) {
+    if (g_cursor_visible) {
+        fb_draw_cell(g_cursor_y, g_cursor_x, true);
+    }
+}
+
+/* Parse the accumulated CSI parameters into a small integer array.
+ * Missing/empty parameters default to `def` (the first one only -
+ * real terminals apply the default to every empty field, but no TUS
+ * application relies on that). */
+static void ansi_parse_params(int *params, int max, int def) {
+    int i = 0, n = 0;
+    while (i < g_csi_len && n < max) {
+        int v = 0;
+        bool any = false;
+        while (i < g_csi_len && g_csi_buf[i] >= '0' && g_csi_buf[i] <= '9') {
+            v = v * 10 + (g_csi_buf[i] - '0');
+            if (v > 9999) {
+                v = 9999;
+            }
+            any = true;
+            i++;
+        }
+        params[n++] = any ? v : def;
+        if (i < g_csi_len && g_csi_buf[i] == ';') {
+            i++;
+        } else {
+            break;
+        }
+    }
+    while (n < max) {
+        params[n++] = def;
+    }
+}
+
+/* Blank [row][col0..col1) with the current colour pair. */
+static void ansi_erase_cells(int row, int col0, int col1) {
+    if (row < 0 || row >= g_rows) {
+        return;
+    }
+    struct fb_cell blank = { ' ', g_cur_color };
+    for (int c = col0; c < col1 && c < g_cols; c++) {
+        if (c < 0) {
+            continue;
+        }
+        g_text[row][c] = blank;
+        fb_paint_cell(row, c, &blank, false);
+    }
+}
+
+static void ansi_alt_enter(void) {
+    if (g_alt_active) {
+        return;
+    }
+    memcpy(g_alt_text, g_text, sizeof(g_alt_text));
+    g_alt_cursor_x = g_cursor_x;
+    g_alt_cursor_y = g_cursor_y;
+    g_alt_fg = g_fg;
+    g_alt_bg = g_bg;
+    g_alt_cur_color = g_cur_color;
+    g_alt_active = true;
+    fb_clear();
+}
+
+static void ansi_alt_exit(void) {
+    if (!g_alt_active) {
+        return;
+    }
+    g_alt_active = false;
+    /* Wipe the alternate screen, then put the saved one back. */
+    struct fb_cell blank = { ' ', g_cur_color };
+    for (int r = 0; r < g_rows; r++) {
+        for (int c = 0; c < g_cols; c++) {
+            g_text[r][c] = blank;
+        }
+    }
+    memset(g_pixels, 0, (size_t)(g_pitch_bytes * g_height));
+    memcpy(g_text, g_alt_text, sizeof(g_text));
+    g_cursor_x = g_alt_cursor_x;
+    g_cursor_y = g_alt_cursor_y;
+    g_fg = g_alt_fg;
+    g_bg = g_alt_bg;
+    g_cur_color = g_alt_cur_color;
+    fb_redraw_live();
+}
+
+/* Run one finished control sequence. `final` is the final byte in
+ * 0x40..0x7E; the parameters live in g_csi_buf. */
+static void ansi_exec(char final) {
+    int params[8];
+    ansi_parse_params(params, 8, 1);
+
+    /* Private (DEC) modes: cursor visibility, alternate screen. */
+    if (g_csi_private) {
+        int m = params[0];
+        if (final == 'h') {
+            if (m == 25) {
+                g_cursor_visible = true;
+            } else if (m == 47 || m == 1049) {
+                ansi_alt_enter();
+            } else if (m == 1048) {
+                g_alt_cursor_x = g_cursor_x;
+                g_alt_cursor_y = g_cursor_y;
+            }
+        } else if (final == 'l') {
+            if (m == 25) {
+                g_cursor_visible = false;
+            } else if (m == 47 || m == 1049) {
+                ansi_alt_exit();
+            } else if (m == 1048) {
+                g_cursor_x = g_alt_cursor_x;
+                g_cursor_y = g_alt_cursor_y;
+            }
+        }
+        return;
+    }
+
+    /* Erase the cursor from its current cell before any move. */
+    fb_draw_cell(g_cursor_y, g_cursor_x, false);
+
+    switch (final) {
+    case 'H': /* CUP: row;col (1-based), defaults 1;1 */
+    case 'f':
+        g_cursor_y = params[0] - 1;
+        g_cursor_x = params[1] - 1;
+        if (g_cursor_y < 0) {
+            g_cursor_y = 0;
+        }
+        if (g_cursor_y >= g_rows) {
+            g_cursor_y = g_rows - 1;
+        }
+        if (g_cursor_x < 0) {
+            g_cursor_x = 0;
+        }
+        if (g_cursor_x >= g_cols) {
+            g_cursor_x = g_cols - 1;
+        }
+        break;
+    case 'A': /* cursor up */
+        g_cursor_y -= params[0];
+        if (g_cursor_y < 0) {
+            g_cursor_y = 0;
+        }
+        break;
+    case 'B': /* cursor down */
+        g_cursor_y += params[0];
+        if (g_cursor_y >= g_rows) {
+            g_cursor_y = g_rows - 1;
+        }
+        break;
+    case 'C': /* cursor right */
+        g_cursor_x += params[0];
+        if (g_cursor_x >= g_cols) {
+            g_cursor_x = g_cols - 1;
+        }
+        break;
+    case 'D': /* cursor left */
+        g_cursor_x -= params[0];
+        if (g_cursor_x < 0) {
+            g_cursor_x = 0;
+        }
+        break;
+    case 'G': /* column absolute */
+    case '`':
+        g_cursor_x = params[0] - 1;
+        if (g_cursor_x < 0) {
+            g_cursor_x = 0;
+        }
+        if (g_cursor_x >= g_cols) {
+            g_cursor_x = g_cols - 1;
+        }
+        break;
+    case 'd': /* row absolute */
+        g_cursor_y = params[0] - 1;
+        if (g_cursor_y < 0) {
+            g_cursor_y = 0;
+        }
+        if (g_cursor_y >= g_rows) {
+            g_cursor_y = g_rows - 1;
+        }
+        break;
+    case 'J': /* erase display */
+        if (params[0] == 2 || params[0] == 3) {
+            for (int r = 0; r < g_rows; r++) {
+                ansi_erase_cells(r, 0, g_cols);
+            }
+        } else if (params[0] == 1) {
+            for (int r = 0; r <= g_cursor_y; r++) {
+                int last = (r == g_cursor_y) ? g_cursor_x + 1 : g_cols;
+                ansi_erase_cells(r, 0, last);
+            }
+        } else { /* 0 or empty: cursor to end of screen */
+            ansi_erase_cells(g_cursor_y, g_cursor_x, g_cols);
+            for (int r = g_cursor_y + 1; r < g_rows; r++) {
+                ansi_erase_cells(r, 0, g_cols);
+            }
+        }
+        break;
+    case 'K': /* erase line */
+        if (params[0] == 2) {
+            ansi_erase_cells(g_cursor_y, 0, g_cols);
+        } else if (params[0] == 1) {
+            ansi_erase_cells(g_cursor_y, 0, g_cursor_x + 1);
+        } else { /* 0 or empty: cursor to end of line */
+            ansi_erase_cells(g_cursor_y, g_cursor_x, g_cols);
+        }
+        break;
+    case 'X': /* erase n characters */
+        ansi_erase_cells(g_cursor_y, g_cursor_x, g_cursor_x + params[0]);
+        break;
+    case 'm': /* SGR */
+        for (int i = 0; i < 8; i++) {
+            int p = params[i];
+            if (p == 0) { /* reset */
+                g_reverse = false;
+                g_fg = COLOR_FG;
+                g_bg = COLOR_BG;
+            } else if (p == 7) {
+                g_reverse = true;
+            } else if (p == 27) {
+                g_reverse = false;
+            } else if (p == 1 || p == 4) {
+                /* bold/underline: no font support, ignore */
+            } else if (p >= 30 && p <= 37) {
+                g_fg = ansi_colors[p - 30];
+            } else if (p >= 40 && p <= 47) {
+                g_bg = ansi_colors[p - 40];
+            } else if (p >= 90 && p <= 97) {
+                g_fg = ansi_colors[p - 90 + 8];
+            } else if (p >= 100 && p <= 107) {
+                g_bg = ansi_colors[p - 100 + 8];
+            } else if (p == 39) {
+                g_fg = COLOR_FG;
+            } else if (p == 49) {
+                g_bg = COLOR_BG;
+            }
+        }
+        fb_update_color();
+        break;
+    default: /* unknown sequence: consume and ignore */
+        break;
+    }
+
+    fb_repaint_cursor();
+}
+
+/* Feed one byte into the escape state machine. Returns true if the
+ * byte was consumed as part of a sequence (nothing was drawn). */
+static bool ansi_consume(char c) {
+    switch (g_ansi_state) {
+    case ANSI_NORMAL:
+        if (c == 0x1B) {
+            g_ansi_state = ANSI_ESC;
+            return true;
+        }
+        return false;
+    case ANSI_ESC:
+        if (c == '[') {
+            g_ansi_state = ANSI_CSI;
+            g_csi_len = 0;
+            g_csi_private = false;
+        } else if (c == 'O') {
+            g_ansi_state = ANSI_SS3;
+        } else {
+            g_ansi_state = ANSI_NORMAL;
+        }
+        return true;
+    case ANSI_SS3:
+        /* ESC O H / ESC O F: Home/End from the application cursor
+         * keys. Treated as a no-op (kilo only reads these, never
+         * writes them). */
+        g_ansi_state = ANSI_NORMAL;
+        return true;
+    case ANSI_CSI:
+        if (c >= 0x40 && c <= 0x7E) { /* final byte */
+            g_ansi_state = ANSI_NORMAL;
+            ansi_exec(c);
+            return true;
+        }
+        if (g_csi_len == 0 && c == '?') {
+            g_csi_private = true;
+            return true;
+        }
+        if ((c >= '0' && c <= '9') || c == ';') {
+            if (g_csi_len < (int)sizeof(g_csi_buf) - 1) {
+                g_csi_buf[g_csi_len++] = c;
+            }
+            return true;
+        }
+        /* Intermediate or unexpected byte: give up on this sequence. */
+        g_ansi_state = ANSI_NORMAL;
+        return true;
+    default:
+        g_ansi_state = ANSI_NORMAL;
+        return true;
+    }
+}
+
 /* Scrollback history ring. */
 static struct fb_cell g_history[FB_HISTORY_ROWS][FB_MAX_COLS];
 static int g_hist_head;   /* next slot to write */
@@ -135,7 +497,9 @@ static void fb_redraw_live(void) {
             fb_draw_cell(row, col, false);
         }
     }
-    fb_draw_cell(g_cursor_y, g_cursor_x, true);
+    if (g_cursor_visible) {
+        fb_draw_cell(g_cursor_y, g_cursor_x, true);
+    }
 }
 
 /* Redraw the whole screen from the scrollback history. g_view_back
@@ -258,6 +622,11 @@ void fb_clear(void) {
 }
 
 void fb_putchar(char c) {
+    /* Escape sequences never reach the normal drawing path. */
+    if (ansi_consume(c)) {
+        return;
+    }
+
     /* New output snaps the view back to the live bottom edge. */
     if (g_view_back != 0) {
         g_view_back = 0;
@@ -309,14 +678,26 @@ void fb_putchar(char c) {
         g_cursor_y = g_rows - 1;
     }
 
-    /* Draw the cursor at its new position. */
-    fb_draw_cell(g_cursor_y, g_cursor_x, true);
+    /* Draw the cursor at its new position (when visible). */
+    if (g_cursor_visible) {
+        fb_draw_cell(g_cursor_y, g_cursor_x, true);
+    }
 }
 
 void fb_set_color(uint32_t fg, uint32_t bg) {
     g_fg = fg;
     g_bg = bg;
-    g_cur_color = palette_lookup(fg, bg);
+    fb_update_color();
+}
+
+/* Report the text grid size (columns x rows) for TIOCGWINSZ. */
+void fb_get_grid(int *cols, int *rows) {
+    if (cols) {
+        *cols = g_cols;
+    }
+    if (rows) {
+        *rows = g_rows;
+    }
 }
 
 void fb_fill(uint32_t color) {

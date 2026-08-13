@@ -43,4 +43,8 @@ void fb_fill(uint32_t color);
 void fb_get_info(uint32_t *width, uint32_t *height, uint32_t *bpp,
                  uint64_t *pitch, void **address);
 
+/* Report the text grid size (columns x rows) - what TIOCGWINSZ
+ * returns to user programs. */
+void fb_get_grid(int *cols, int *rows);
+
 #endif /* TUS_DRIVERS_FB_H */

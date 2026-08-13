@@ -35,6 +35,10 @@
 #define SYS_MUNMAP   13 /* munmap(addr, len) */
 #define SYS_ARCH_PRCTL 14 /* arch_prctl(op, addr) - ARCH_SET_FS/ARCH_GET_FS */
 #define SYS_WRITEV   15 /* writev(fd, iovec*, count) */
+/* v0.6.0: kilo (a real terminal application) needs a clock and file
+ * truncation. */
+#define SYS_TIME     16 /* time(NULL): seconds since boot */
+#define SYS_FTRUNCATE 17 /* ftruncate(fd, length) */
 
 /* IDT entry stub (vector 0x80). Installed by idt_init(). */
 void syscall_entry(void);

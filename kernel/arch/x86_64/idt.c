@@ -83,6 +83,72 @@ static const char *const g_exception_names[32] = {
  * The DEFINE_EXC_WITH_ERROR lines below are exactly these vectors:
  * 8, 10, 11, 12, 13, 14, 17, 21, 29, 30. */
 
+/* Page fault (vector 14): the #PF handler is wrapped in a naked stub
+ * that saves every register, so a crash dump shows the exact state
+ * (including RDI = memset/memcpy destination) instead of only the
+ * CPU-pushed frame. */
+struct pf_regs {
+    uint64_t rax, rbx, rcx, rdx, rsi, rdi;
+    uint64_t rbp, r8, r9, r10, r11, r12, r13, r14, r15;
+    uint64_t error_code;
+    uint64_t rip, cs, rflags, rsp, ss;
+};
+
+static void exc_page_fault_c(struct pf_regs *r) __attribute__((used));
+static void exc_page_fault_c(struct pf_regs *r) {
+    console_write("\n\n*** KERNEL PANIC ***\n");
+    kprintf("Exception 14: Page Fault\n");
+    kprintf("Error code: 0x%llx\n", (unsigned long long)r->error_code);
+    uint64_t cr2;
+    __asm__ volatile("mov %%cr2, %0" : "=r"(cr2));
+    kprintf("CR2     : 0x%llx\n", (unsigned long long)cr2);
+    kprintf("RDI     : 0x%llx\n", (unsigned long long)r->rdi);
+    kprintf("RSI     : 0x%llx\n", (unsigned long long)r->rsi);
+    kprintf("RDX     : 0x%llx\n", (unsigned long long)r->rdx);
+    kprintf("RAX     : 0x%llx\n", (unsigned long long)r->rax);
+    kprintf("RCX     : 0x%llx\n", (unsigned long long)r->rcx);
+    kprintf("RBX     : 0x%llx\n", (unsigned long long)r->rbx);
+    kprintf("RBP     : 0x%llx\n", (unsigned long long)r->rbp);
+    kprintf("R12     : 0x%llx\n", (unsigned long long)r->r12);
+    kprintf("RIP    : 0x%llx\n", (unsigned long long)r->rip);
+    kprintf("CS     : 0x%llx\n", (unsigned long long)r->cs);
+    kprintf("RFLAGS : 0x%llx\n", (unsigned long long)r->rflags);
+    kprintf("RSP    : 0x%llx\n", (unsigned long long)r->rsp);
+    kprintf("SS     : 0x%llx\n", (unsigned long long)r->ss);
+    kprintf("STACK  :");
+    uint64_t *sp = (uint64_t *)(uintptr_t)r->rsp;
+    for (int i = 0; i < 24; i++) {
+        kprintf(" %llx", (unsigned long long)sp[i]);
+    }
+    kprintf("\n");
+    console_write("System halted.\n");
+    for (;;) {
+        cli();
+        hlt();
+    }
+}
+
+__attribute__((naked)) static void exc_page_fault(void) {
+    __asm__ volatile(
+        "push %r15\n\t"
+        "push %r14\n\t"
+        "push %r13\n\t"
+        "push %r12\n\t"
+        "push %r11\n\t"
+        "push %r10\n\t"
+        "push %r9\n\t"
+        "push %r8\n\t"
+        "push %rbp\n\t"
+        "push %rdi\n\t"
+        "push %rsi\n\t"
+        "push %rdx\n\t"
+        "push %rcx\n\t"
+        "push %rbx\n\t"
+        "push %rax\n\t"
+        "mov %rsp, %rdi\n\t"
+        "call exc_page_fault_c\n");
+}
+
 /*
  * Fatal exception: print a register dump and stop the system. This is
  * the kernel panic path. We disable interrupts and halt forever so the
@@ -133,7 +199,7 @@ DEFINE_EXC_NO_ERROR(0)  DEFINE_EXC_NO_ERROR(1)  DEFINE_EXC_NO_ERROR(2)
 DEFINE_EXC_NO_ERROR(3)  DEFINE_EXC_NO_ERROR(4)  DEFINE_EXC_NO_ERROR(5)
 DEFINE_EXC_NO_ERROR(6)  DEFINE_EXC_NO_ERROR(7)  DEFINE_EXC_WITH_ERROR(8)
 DEFINE_EXC_NO_ERROR(9)  DEFINE_EXC_WITH_ERROR(10) DEFINE_EXC_WITH_ERROR(11)
-DEFINE_EXC_WITH_ERROR(12) DEFINE_EXC_WITH_ERROR(13) DEFINE_EXC_WITH_ERROR(14)
+DEFINE_EXC_WITH_ERROR(12) DEFINE_EXC_WITH_ERROR(13)
 DEFINE_EXC_NO_ERROR(15) DEFINE_EXC_NO_ERROR(16) DEFINE_EXC_WITH_ERROR(17)
 DEFINE_EXC_NO_ERROR(18) DEFINE_EXC_NO_ERROR(19) DEFINE_EXC_NO_ERROR(20)
 DEFINE_EXC_WITH_ERROR(21) DEFINE_EXC_NO_ERROR(22) DEFINE_EXC_NO_ERROR(23)
@@ -153,7 +219,7 @@ static const uintptr_t g_exception_stubs[32] = {
     [8]  = STUB_CAST(exc_with_error_8), [9]  = STUB_CAST(exc_no_error_9),
     [10] = STUB_CAST(exc_with_error_10),[11] = STUB_CAST(exc_with_error_11),
     [12] = STUB_CAST(exc_with_error_12),[13] = STUB_CAST(exc_with_error_13),
-    [14] = STUB_CAST(exc_with_error_14),[15] = STUB_CAST(exc_no_error_15),
+    [14] = STUB_CAST(exc_page_fault),[15] = STUB_CAST(exc_no_error_15),
     [16] = STUB_CAST(exc_no_error_16),[17] = STUB_CAST(exc_with_error_17),
     [18] = STUB_CAST(exc_no_error_18),[19] = STUB_CAST(exc_no_error_19),
     [20] = STUB_CAST(exc_no_error_20),[21] = STUB_CAST(exc_with_error_21),

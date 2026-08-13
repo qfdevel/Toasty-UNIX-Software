@@ -13,6 +13,7 @@
 #include "tsh.h"
 #include "../core/console.h"
 #include "../core/klib.h"
+#include "../drivers/keyboard.h"
 #include "../elf/tus_elf.h"
 #include "../sched/sched.h"
 #include "../syscall/syscall.h"
@@ -339,12 +340,17 @@ static int cmd_fbfill(int argc, char **argv) {
 
 static int cmd_exec(int argc, char **argv) {
     if (argc < 2) {
-        console_write("usage: exec <static-elf-path>\n");
+        console_write("usage: exec <static-elf-path> [args...]\n");
         return 1;
     }
     char resolved[PATH_BUF];
     path_resolve(argv[1], resolved, sizeof(resolved));
-    elf_exec(resolved);
+    /* Hand the console keyboard to the new program: it may be a
+     * foreground application (kilo) that wants the tty in raw mode.
+     * The new task claims ownership on its first read and gives it
+     * back when it exits. */
+    kbd_input_release(kbd_input_owner());
+    elf_exec(resolved, argc - 2, &argv[2]);
     return 0;
 }
 

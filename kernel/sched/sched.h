@@ -76,8 +76,12 @@ uint64_t sched_tick(uint64_t frame_rsp);
 /* Create a ring-3 task that starts executing `entry` in the address
  * space `cr3` (see vmm_space_clone). The user stack is mapped inside
  * that space, and the fake interrupt frame is pre-built so the first
- * switch IRETQs straight into ring 3. Returns the new PID or -1. */
-int task_create_user(uint64_t entry, const char *name, uint64_t cr3);
+ * switch IRETQs straight into ring 3. `argc`/`argv` (argv[0] is
+ * conventionally the program path) are copied onto the user stack in
+ * the standard SysV layout so a C runtime sees real arguments.
+ * Returns the new PID or -1. */
+int task_create_user(uint64_t entry, const char *name, uint64_t cr3,
+                     int argc, char **argv);
 
 /* Current task; NULL before sched_init(). */
 struct task *sched_current(void);

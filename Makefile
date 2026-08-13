@@ -13,7 +13,7 @@ LD      := ld
 # musl libc (userspace C library, ported to the TUS syscall ABI).
 # `make musl` (or the first kernel build) configures, builds and
 # installs musl-1.2.6 into musl-out/ (headers + libc.a + crt).
-MUSL_DIR := musl-1.2.6
+MUSL_DIR := sources/musl-1.2.6
 MUSL_OUT := musl-out
 MUSL_INC := $(MUSL_OUT)/usr/include
 MUSL_LIB := $(MUSL_OUT)/usr/lib
@@ -39,7 +39,7 @@ DEPS        := $(KERNEL_OBJS:.o=.d)
 # tests/enforce.elf and the musl-linked tests/musl_hello.elf are
 # converted to object files (binary blobs) and linked into the
 # kernel, then exposed at /boot/ in the VFS.
-TEST_ELFS := tests/hello.elf tests/enforce.elf tests/musl_hello.elf
+TEST_ELFS := tests/hello.elf tests/enforce.elf tests/musl_hello.elf tests/kilo.elf
 TEST_ELF_BLOBS := $(TEST_ELFS:.elf=_blob.o)
 
 KERNEL_OBJS += $(TEST_ELF_BLOBS)
@@ -77,6 +77,21 @@ tests/musl_hello.elf: tests/musl_hello.c $(MUSL_LIB)/libc.a
 		-I$(MUSL_INC) -c $< -o tests/musl_hello.o
 	$(LD) -m elf_x86_64 -static -e _start -Ttext 0x10000000 -o $@ \
 		$(MUSL_LIB)/crt1.o $(MUSL_LIB)/crti.o tests/musl_hello.o \
+		-L$(MUSL_LIB) -lc $(MUSL_LIB)/crtn.o
+
+# tests/kilo.elf: the kilo text editor (sources/kilo/kilo.c) linked
+# against the ported musl libc, same recipe as musl_hello.elf. Kilo is
+# a real terminal application: it needs termios (TCGETS/TCSETS),
+# TIOCGWINSZ, raw-mode keyboard input with escape sequences and ANSI
+# output - all of which the v0.6.0 kernel provides. No source changes
+# to kilo were required; the port lives entirely in the kernel and the
+# musl ABI bridge.
+tests/kilo.elf: sources/kilo/kilo.c $(MUSL_LIB)/libc.a
+	$(CC) -m64 -ffreestanding -fno-stack-protector -fno-pic \
+		-mno-red-zone -mgeneral-regs-only -O2 -nostdinc \
+		-I$(MUSL_INC) -c $< -o tests/kilo.o
+	$(LD) -m elf_x86_64 -static -e _start -Ttext 0x10000000 -o $@ \
+		$(MUSL_LIB)/crt1.o $(MUSL_LIB)/crti.o tests/kilo.o \
 		-L$(MUSL_LIB) -lc $(MUSL_LIB)/crtn.o
 
 # ld -r -b binary turns a file into an object with symbols

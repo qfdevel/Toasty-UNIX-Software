@@ -85,6 +85,7 @@ long vfs_close(long fd);
 long vfs_read(long fd, void *buf, size_t count);
 long vfs_write(long fd, const void *buf, size_t count);
 long vfs_ioctl(long fd, uint64_t request, void *arg);
+long vfs_ftruncate(long fd, long length);
 long vfs_readdir(long fd, void *buf, size_t count);
 long vfs_mkdir(const char *path);
 long vfs_unlink(const char *path);

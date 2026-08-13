@@ -7,7 +7,7 @@ built with the [Limine](https://limine-bootloader.org) bootloader. It
 targets every 64-bit machine, with a modular, clean and well-documented
 codebase.
 
-## Current features (v0.5.0)
+## Current features (v0.6.0)
 
 - Boots via Limine (BIOS and UEFI), 64-bit long mode, higher-half kernel
 - **Serial driver** - 16550 UART on COM1 (115200 8N1), debug mirror for
@@ -40,12 +40,23 @@ codebase.
   `src/internal/tus_syscall.c`). Real C programs (printf, malloc,
   fopen, …) link statically against `musl-out/usr/lib/libc.a`;
   demo at `/boot/musl_hello.elf`
+- **ANSI/VT100 console** - the framebuffer text console understands
+  the escape sequences a full-screen app needs: cursor positioning,
+  erase, 16-colour SGR (+reverse video), cursor show/hide,
+  alternate screen
+- **termios** - `/dev/tty0` supports TCGETS/TCSETS/TIOCGWINSZ and
+  raw mode (ICANON/ECHO/ICRNL honoured); arrow/function keys arrive
+  as real escape sequences
+- **kilo** - the single-file text editor runs unmodified as a ring-3
+  musl program (`exec /boot/kilo.elf <file>`): type, Ctrl-S to save,
+  Ctrl-Q to quit; console input ownership lets the shell and a
+  foreground app share the keyboard safely
 - **tsh** - interactive shell: `help`, `echo`, `clear`, `ver`, `about`,
   `sysinfo`, `reboot`, `crash`, `ls`, `cat`, `mkdir`, `touch`, `rm`,
-  `uptime`, `sleep`, `fbfill`, `cd`, `pwd`, `ps`, `exec`
+  `uptime`, `sleep`, `fbfill`, `cd`, `pwd`, `ps`, `exec` (with args)
 - **ELF loader** - runs static (ET_EXEC) x86-64 binaries via
   `tsh`'s `exec` command; embedded demo programs at `/boot/hello.elf`,
-  `/boot/enforce.elf`, `/boot/musl_hello.elf`
+  `/boot/enforce.elf`, `/boot/musl_hello.elf`, `/boot/kilo.elf`
 - **Interrupt handling** - full IDT, remapped PIC, register dump on CPU
   exceptions (kernel panic, incl. CR2 on page faults)
 
@@ -55,21 +66,23 @@ codebase.
 TOS/
 ├── limine-bin/            bootloader binaries (provided)
 ├── include/limine.h       Limine boot protocol header
-├── musl-1.2.6/            userspace C library (ported; source committed)
+├── sources/
+│   ├── musl-1.2.6/        userspace C library (ported; source committed)
+│   └── kilo/              the kilo text editor (unmodified upstream)
 ├── musl-out/              musl build output: headers, libc.a, crt (ignored)
 ├── kernel/
 │   ├── linker.ld          higher-half linker script
 │   ├── main.c             entry point, boot sequence
 │   ├── arch/x86_64/       CPU-specific: IDT, PIC, CPUID, port I/O, SSE
 │   ├── core/              klib (mem + printf), console, bootinfo
-│   ├── drivers/           serial, keyboard, framebuffer, PIT
+│   ├── drivers/           serial, keyboard, framebuffer (ANSI), PIT
 │   ├── mm/                PMM, VMM, kmalloc
 │   ├── elf/               elfload port + TUS exec glue
-│   ├── vfs/               VFS tree, fd table, device nodes
+│   ├── vfs/               VFS tree, fd table, device nodes (termios)
 │   ├── syscall/           int $0x80 gate and dispatch
 │   ├── sched/             round-robin scheduler, FPU/TLS task state
 │   └── shell/             tsh, core commands, fs commands
-├── tests/                 test_boot.py (25 checks) + demo ELFs
+├── tests/                 test_boot.py (29 checks) + demo ELFs
 ├── Makefile
 └── limine.conf
 ```

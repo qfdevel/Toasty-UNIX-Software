@@ -37,6 +37,8 @@
 #define TUS_SYS_MUNMAP  13
 #define TUS_SYS_ARCH_PRCTL 14
 #define TUS_SYS_WRITEV  15
+#define TUS_SYS_TIME    16
+#define TUS_SYS_FTRUNCATE 17
 
 #define TUS_ENOSYS (-38)
 #define TUS_EFAULT (-14)
@@ -64,6 +66,31 @@ static __inline long tus_raw(long n, long a1, long a2, long a3,
                      : "0"(n)
                      : "rcx", "r11", "memory");
     return ret;
+}
+
+/* struct timeval (musl layout). */
+struct tus_timeval {
+    long tv_sec;
+    long tv_usec;
+};
+
+/* clock_gettime / clock_gettime64 emulation: TUS has a single
+ * monotonic clock (seconds since boot via SYS_TIME). REALTIME and
+ * MONOTONIC both map to it. musl's time() is built on
+ * clock_gettime(CLOCK_REALTIME), so without this every status
+ * message in a TUS application would read uninitialised stack. */
+static __inline long tus_clock_gettime(long clk, const void *ts) {
+    if (ts == 0 || (clk != 0 && clk != 1)) {
+        return -22; /* -EINVAL */
+    }
+    long secs = tus_raw(TUS_SYS_TIME, 0, 0, 0, 0, 0, 0);
+    if (secs < 0) {
+        return secs;
+    }
+    struct tus_timespec *t = (struct tus_timespec *)ts;
+    t->tv_sec = secs;
+    t->tv_nsec = 0;
+    return 0;
 }
 
 /* Convert a userspace timespec to whole seconds, rounding up (the
@@ -95,9 +122,11 @@ long tus_syscall(long n, long a1, long a2, long a3,
     case 20:  return tus_raw(TUS_SYS_WRITEV, a1, a2, a3, 0, 0, 0);  /* writev */
     case 39:  return tus_raw(TUS_SYS_GETPID, 0, 0, 0, 0, 0, 0);     /* getpid */
     case 60:  return tus_raw(TUS_SYS_EXIT, a1, 0, 0, 0, 0, 0);      /* exit */
+    case 77:  return tus_raw(TUS_SYS_FTRUNCATE, a1, a2, 0, 0, 0, 0); /* ftruncate */
     case 83:  return tus_raw(TUS_SYS_MKDIR, a1, 0, 0, 0, 0, 0);     /* mkdir */
     case 87:  return tus_raw(TUS_SYS_UNLINK, a1, 0, 0, 0, 0, 0);    /* unlink */
     case 158: return tus_raw(TUS_SYS_ARCH_PRCTL, a1, a2, 0, 0, 0, 0); /* arch_prctl */
+    case 201: return tus_raw(TUS_SYS_TIME, 0, 0, 0, 0, 0, 0);       /* time */
     case 231: return tus_raw(TUS_SYS_EXIT, a1, 0, 0, 0, 0, 0);      /* exit_group */
     case 257: return tus_raw(TUS_SYS_OPEN, a2, a3, 0, 0, 0, 0);     /* openat(dirfd, path, flags, mode) */
     case 258: return tus_raw(TUS_SYS_MKDIR, a2, 0, 0, 0, 0, 0);     /* mkdirat(dirfd, path, mode) */
@@ -109,6 +138,23 @@ long tus_syscall(long n, long a1, long a2, long a3,
     case 28:  return 0;   /* madvise: allocator hint, safe to ignore */
     case 95:  return 0;   /* umask: TUS has no permission bits */
     case 35:  return tus_sleep_from_timespec((const void *)a1); /* nanosleep(req, rem) */
+    case 96: { /* gettimeofday(tv, tz) */
+        if (a1 == 0) {
+            return 0;
+        }
+        long secs = tus_raw(TUS_SYS_TIME, 0, 0, 0, 0, 0, 0);
+        if (secs < 0) {
+            return secs;
+        }
+        struct tus_timeval *tv = (struct tus_timeval *)a1;
+        tv->tv_sec = secs;
+        tv->tv_usec = 0;
+        return 0;
+    }
+    case 228: /* clock_gettime(clk, ts) */
+        return tus_clock_gettime(a1, (const void *)a2);
+    case 403: /* clock_gettime64(clk, ts) */
+        return tus_clock_gettime(a1, (const void *)a2);
     case 115: /* clock_nanosleep_time64(clk, flags, req, rem) */
     case 230: /* clock_nanosleep(clk, flags, req, rem) */
         if (a2 != 0) {

@@ -28,6 +28,7 @@
 #include "mm/kmalloc.h"
 #include "mm/pmm.h"
 #include "mm/vmm.h"
+#include "drivers/keyboard.h"
 
 /* Selectors from gdt.c (duplicated here to keep sched.c self-contained
  * for the fake IRETQ frame; they must match gdt.c). User segments are
@@ -36,7 +37,13 @@
 #define SEL_USER_DATA 0x23 /* 0x20 | RPL 3 */
 
 #define STACK_SIZE 16384   /* 16 KiB kernel and user stacks */
-#define FRAME_WORDS 14     /* 9 caller-saved + 5 IRETQ fields */
+/* Frame words: 9 caller-saved + 6 callee-saved (rbx rbp r12-r15) + 5
+ * IRETQ fields. The callee-saved registers MUST travel with the task:
+ * a tick can preempt ring-0 code mid-function, detour through a
+ * ring-3 task that clobbers them, and resume the interrupted code -
+ * which then computes with garbage register values (the fb_scroll_up
+ * corruption bug). */
+#define FRAME_WORDS 20     /* 15 registers + 5 IRETQ fields */
 
 /* Virtual address where user stacks live. Each task has its own
  * address space, so every task can use the same stack address; the
@@ -129,7 +136,8 @@ void sched_init(void) {
     tss_set_rsp0(g_current->kstack_top);
 }
 
-int task_create_user(uint64_t entry, const char *name, uint64_t cr3) {
+int task_create_user(uint64_t entry, const char *name, uint64_t cr3,
+                     int argc, char **argv) {
     struct task *t = task_find_slot();
     if (t == NULL) {
         return -1;
@@ -161,27 +169,68 @@ int task_create_user(uint64_t entry, const char *name, uint64_t cr3) {
     /* Initial user stack image, laid out the way a C runtime expects
      * it (crt1 reads argc at (%rsp), argv after it, then a NULL
      * envp, then the auxiliary vector):
-     *   [0] argc = 0
-     *   [1] argv[0] = NULL
-     *   [2] envp[0] = NULL
-     *   [3] auxv[0] = AT_PAGESZ
-     *   [4] auxv[1] = 4096
-     *   [5] auxv[2] = 0 (terminator)
-     * RSP points at word [0]. The words sit in the last 48 bytes of
-     * the top stack page; write them through the HHDM mapping (the
-     * caller may not be in this space). */
+     *   [0] argc
+     *   [1..argc] argv[0..argc-1] pointers
+     *   [argc+1] NULL (argv terminator)
+     *   [argc+2] envp[0] = NULL
+     *   [argc+3] auxv[0] = AT_PAGESZ
+     *   [argc+4] auxv[1] = 4096
+     *   [argc+5] auxv[2] = 0 (terminator)
+     * RSP points at word [0]. The argument strings are copied just
+     * below the pointer array (still inside the top stack page) and
+     * the pointers are written as user virtual addresses, since the
+     * kernel heap is not readable from ring 3. All writes go through
+     * the HHDM mapping (the caller may not be in this space). */
+    int nargs = argc + 1;                 /* program name + arguments */
+    int nwords = nargs + 6;               /* argc + argv[] + NULL +
+                                             envp[0] + 2 auxv + term */
+    if (nargs > 16) {
+        nargs = 16;
+        nwords = nargs + 6;
+    }
     uint64_t top_frame = vmm_translate_in(cr3, ustack + STACK_SIZE - 4096);
     if (top_frame == 0) {
         return -1;
     }
-    uint64_t *init = (uint64_t *)(pmm_phys_to_virt(top_frame) + 4048);
-    init[0] = 0;        /* argc */
-    init[1] = 0;        /* argv[0] */
-    init[2] = 0;        /* envp[0] */
-    init[3] = AT_PAGESZ;
-    init[4] = 4096;     /* page size */
-    init[5] = 0;        /* auxv terminator */
-    uint64_t ustack_rsp = ustack + STACK_SIZE - 48;
+    char *frame_base = (char *)pmm_phys_to_virt(top_frame);
+    uint64_t *init = (uint64_t *)(frame_base + 4096 - 8 * nwords);
+
+    /* Copy the argument strings at the BOTTOM of the top page,
+     * growing upward. The initial RSP sits at the array, so the
+     * first ~4 KiB of stack usage (function calls, musl startup)
+     * cannot reach the strings. They are copied through the HHDM
+     * mapping (the caller may not be in this space) but the pointers
+     * stored in the array are user virtual addresses, since the
+     * kernel heap is not readable from ring 3. */
+    char *sptr = frame_base + 64;
+    uint64_t arg_ptrs[16];
+    const char *args[16];
+    args[0] = name != NULL ? name : "";
+    for (int i = 1; i < nargs; i++) {
+        args[i] = (argv != NULL && argv[i - 1] != NULL) ? argv[i - 1] : "";
+    }
+    for (int i = 0; i < nargs; i++) {
+        size_t avail = (size_t)((char *)init - sptr);
+        size_t slen = strlen(args[i]);
+        if (slen + 1 > avail) {
+            slen = avail > 0 ? avail - 1 : 0;
+        }
+        memcpy(sptr, args[i], slen + 1);
+        arg_ptrs[i] = (uint64_t)(ustack + STACK_SIZE - 4096) +
+                      (uint64_t)(sptr - frame_base);
+        sptr += slen + 1;
+    }
+
+    init[0] = (uint64_t)nargs;   /* argc */
+    for (int i = 0; i < nargs; i++) {
+        init[1 + i] = arg_ptrs[i];
+    }
+    init[1 + nargs] = 0;        /* argv terminator */
+    init[2 + nargs] = 0;        /* envp[0] */
+    init[3 + nargs] = AT_PAGESZ;
+    init[4 + nargs] = 4096;     /* page size */
+    init[5 + nargs] = 0;        /* auxv terminator */
+    uint64_t ustack_rsp = ustack + STACK_SIZE - 8 * nwords;
 
     t->pid = g_next_pid++;
     t->state = TASK_READY;
@@ -208,11 +257,12 @@ int task_create_user(uint64_t entry, const char *name, uint64_t cr3) {
 
     /* Build the fake interrupt frame at the top of the kernel stack.
      * Layout (lowest first, matching what the CPU pushes on a
-     * ring-3->ring-0 interrupt, plus the 9 caller-saved registers the
-     * stub pushes):
-     *   [r11 r10 r9 r8 rdi rsi rdx rcx rax] [rip cs rflags rsp ss]
-     * The stub pops the 9 registers, IRETQ consumes the rest and the
-     * task starts at `entry` in ring 3. */
+     * ring-3->ring-0 interrupt, plus the 15 registers the stub
+     * pushes):
+     *   [r15 r14 r13 r12 rbp rbx r11 r10 r9 r8 rdi rsi rdx rcx rax]
+     *   [rip cs rflags rsp ss]
+     * The stub pops the 15 registers, IRETQ consumes the rest and
+     * the task starts at `entry` in ring 3. */
     uint64_t *f = (uint64_t *)(uintptr_t)t->kstack_top;
     f[-1]  = SEL_USER_DATA;   /* ss  */
     f[-2]  = ustack_rsp;      /* rsp: points at the init stack image */
@@ -224,7 +274,7 @@ int task_create_user(uint64_t entry, const char *name, uint64_t cr3) {
     f[-4]  = SEL_USER_CODE;   /* cs  */
     f[-5]  = entry;           /* rip */
     for (int i = 6; i <= FRAME_WORDS; i++) {
-        f[-i] = 0;            /* caller-saved registers: don't care */
+        f[-i] = 0;            /* registers: don't care for a fresh task */
     }
     t->rsp = t->kstack_top - FRAME_WORDS * 8;
 
@@ -232,9 +282,12 @@ int task_create_user(uint64_t entry, const char *name, uint64_t cr3) {
 }
 
 /*
- * IRQ0 entry stub. Saves the caller-saved registers, calls
- * sched_tick(), and either resumes the current task or switches RSP
- * to the next task's frame and returns through it.
+ * IRQ0 entry stub. Saves ALL general-purpose registers (caller- and
+ * callee-saved), calls sched_tick(), and either resumes the current
+ * task or switches RSP to the next task's frame and returns through
+ * it. Saving the callee-saved registers is essential: the interrupted
+ * kernel code may be mid-computation (e.g. fb_putchar's scroll) and
+ * relies on rbx/rbp/r12-r15 surviving a detour through a ring-3 task.
  */
 __attribute__((naked)) void sched_tick_entry(void) {
     __asm__ volatile(
@@ -247,12 +300,24 @@ __attribute__((naked)) void sched_tick_entry(void) {
         "push %r9\n\t"
         "push %r10\n\t"
         "push %r11\n\t"
+        "push %rbx\n\t"
+        "push %rbp\n\t"
+        "push %r12\n\t"
+        "push %r13\n\t"
+        "push %r14\n\t"
+        "push %r15\n\t"
         "mov %rsp, %rdi\n\t"
         "call sched_tick\n\t"
         "test %rax, %rax\n\t"
         "jz 1f\n\t"
         "mov %rax, %rsp\n\t"
         "1:\n\t"
+        "pop %r15\n\t"
+        "pop %r14\n\t"
+        "pop %r13\n\t"
+        "pop %r12\n\t"
+        "pop %rbp\n\t"
+        "pop %rbx\n\t"
         "pop %r11\n\t"
         "pop %r10\n\t"
         "pop %r9\n\t"
@@ -327,6 +392,10 @@ void task_exit(int status) {
     g_current->state = TASK_ZOMBIE;
     g_current->exit_status = status;
 
+    /* A foreground program (kilo) that owned the console keyboard
+     * must give it back so the shell can read again. */
+    kbd_input_release(g_current->pid);
+
     struct task *next = task_next(g_current);
     if (next == g_current) {
         /* No other task: halt the system. */
@@ -348,9 +417,16 @@ void task_exit(int status) {
     wrmsr(MSR_FS_BASE, next->fs_base);
     g_current = next;
 
-    /* Switch to the next task's frame without returning. */
+    /* Switch to the next task's frame without returning. The pop order
+ * mirrors sched_tick_entry's pushes (callee-saved first). */
     __asm__ volatile(
         "mov %0, %%rsp\n\t"
+        "pop %%r15\n\t"
+        "pop %%r14\n\t"
+        "pop %%r13\n\t"
+        "pop %%r12\n\t"
+        "pop %%rbp\n\t"
+        "pop %%rbx\n\t"
         "pop %%r11\n\t"
         "pop %%r10\n\t"
         "pop %%r9\n\t"

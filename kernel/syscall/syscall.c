@@ -248,7 +248,9 @@ long syscall_dispatch(struct syscall_regs *r, uint64_t cs) {
     case SYS_CLOSE:
         return vfs_close((int)r->rdi);
     case SYS_IOCTL:
-        if (!access_ok(from_user, (void *)r->rdx, 1)) {
+        /* The ioctl arg blob may be a termios (57 bytes), a winsize
+         * (8 bytes) or a device info struct; check the worst case. */
+        if (!access_ok(from_user, (void *)r->rdx, 64)) {
             return -EFAULT;
         }
         return vfs_ioctl((int)r->rdi, r->rsi, (void *)r->rdx);
@@ -284,6 +286,10 @@ long syscall_dispatch(struct syscall_regs *r, uint64_t cs) {
         return sys_arch_prctl(r->rdi, r->rsi, from_user);
     case SYS_WRITEV:
         return sys_writev(r->rdi, (void *)r->rsi, r->rdx, from_user);
+    case SYS_TIME:
+        return (long)(pit_uptime_ms() / 1000);
+    case SYS_FTRUNCATE:
+        return vfs_ftruncate((int)r->rdi, (long)r->rsi);
     default:
         return -ENOSYS;
     }

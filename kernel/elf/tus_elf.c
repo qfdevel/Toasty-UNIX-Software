@@ -31,16 +31,18 @@ static long g_elf_fd = -1;
 
 /* ---- embedded test programs ---- */
 
-/* tests/hello.elf, tests/enforce.elf and tests/musl_hello.elf linked
- * into the kernel as binary blobs (see Makefile: *_blob.o). Exposed
- * to the VFS at /boot/ so `exec /boot/hello.elf` works out of the
- * box. */
+/* tests/hello.elf, tests/enforce.elf, tests/musl_hello.elf and
+ * tests/kilo.elf linked into the kernel as binary blobs (see
+ * Makefile: *_blob.o). Exposed to the VFS at /boot/ so
+ * `exec /boot/kilo.elf /test.txt` works out of the box. */
 extern char _binary_tests_hello_elf_start[];
 extern char _binary_tests_hello_elf_end[];
 extern char _binary_tests_enforce_elf_start[];
 extern char _binary_tests_enforce_elf_end[];
 extern char _binary_tests_musl_hello_elf_start[];
 extern char _binary_tests_musl_hello_elf_end[];
+extern char _binary_tests_kilo_elf_start[];
+extern char _binary_tests_kilo_elf_end[];
 
 static void elf_install_blob(const char *path, char *start, char *end) {
     size_t len = (size_t)(end - start);
@@ -67,6 +69,9 @@ void elf_install_test_program(void) {
     elf_install_blob("/boot/musl_hello.elf",
                      _binary_tests_musl_hello_elf_start,
                      _binary_tests_musl_hello_elf_end);
+    elf_install_blob("/boot/kilo.elf",
+                     _binary_tests_kilo_elf_start,
+                     _binary_tests_kilo_elf_end);
 }
 
 static bool tus_pread(el_ctx *ctx, void *dest, size_t nb, size_t offset) {
@@ -130,7 +135,9 @@ static void elf_error(const char *what, el_status st) {
 
 /*
  * Load the static ELF at `path` and start it as a ring-3 task in its
- * own address space. Returns 0 on success, a negative errno otherwise.
+ * own address space. `argc`/`argv` are forwarded to the program
+ * (argv[0] is set to the path). Returns 0 on success, a negative
+ * errno otherwise.
  *
  * The task's space is created first, then CR3 is switched to it for
  * the duration of the load so el_load's segment writes land in the
@@ -138,7 +145,7 @@ static void elf_error(const char *what, el_status st) {
  * switch tasks while we are inside a half-initialised space; the
  * kernel half is shared, so running kernel code there is safe.
  */
-long elf_exec(const char *path) {
+long elf_exec(const char *path, int argc, char **argv) {
     if (path == NULL) {
         return -EINVAL;
     }
@@ -184,7 +191,7 @@ long elf_exec(const char *path) {
     /* ET_EXEC images need no relocations: skip el_relocate().
      * Spawn a ring-3 task that starts at the entry point inside this
      * address space; the scheduler runs it alongside the shell. */
-    int pid = task_create_user(ctx.ehdr.e_entry, path, cr3);
+    int pid = task_create_user(ctx.ehdr.e_entry, path, cr3, argc, argv);
 
     /* Back to the shell's space; the new task's space is only entered
      * by the scheduler (CR3 switch on its first time slice). */

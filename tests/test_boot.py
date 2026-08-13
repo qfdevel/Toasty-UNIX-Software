@@ -195,9 +195,9 @@ def main():
         offset = wait_for("hi", offset=offset)
         ok("echo prints its arguments")
 
-        # 3. ver (0.4.0 now)
+        # 3. ver (0.6.0 now)
         type_text(sock, "ver\r")
-        offset = wait_for("TUS kernel 0.4.0", offset=offset)
+        offset = wait_for("TUS kernel 0.6.0", offset=offset)
         ok("ver reports the kernel version")
 
         # 4. sysinfo (now with PMM stats and uptime)
@@ -313,12 +313,49 @@ def main():
         type_text(sock, "exec /boot/musl_hello.elf\r")
         offset = wait_for("started as pid", offset=offset)
         offset = wait_for("musl 1.2.6 on TUS: hello from libc", offset=offset)
-        offset = wait_for("argc=0", offset=offset)
+        offset = wait_for("argc=1", offset=offset)
+        offset = wait_for("argv0=/boot/musl_hello.elf", offset=offset)
         offset = wait_for("pid=", offset=offset)
         offset = wait_for("malloc: heap string", offset=offset)
         offset = wait_for("free ok", offset=offset)
         offset = wait_for("all good", offset=offset)
         ok("musl libc program runs: printf, malloc, SSE strlen, fopen, getpid")
+
+        # 12f. kilo: a real terminal application linked against musl.
+        #      Exercises termios (TCGETS/TCSETS via ioctl), TIOCGWINSZ
+        #      window size, raw-mode input with escape sequences, the
+        #      ANSI/VT100 output path (cursor, erase, SGR, status bar),
+        #      argv forwarding through exec, and file save via
+        #      ftruncate + write. kilo itself needed NO source changes.
+        type_text(sock, "exec /boot/kilo.elf /kilo.txt\r")
+        offset = wait_for("started as pid", offset=offset)
+        offset = wait_for("/kilo.txt - 0 lines", offset=offset)
+        ok("kilo starts with the filename in the status bar")
+
+        # The editor screen is rendered on the framebuffer (tildes +
+        # status bar lit pixels), not just on the serial log.
+        time.sleep(1.0)
+        screendump(sock, "/tmp/tus-kilo0.ppm")
+        kilo_lit = count_nonblack_pixels("/tmp/tus-kilo0.ppm")
+        assert kilo_lit > 5000, \
+            f"kilo did not render on the framebuffer ({kilo_lit} px)"
+        ok(f"kilo renders the editor screen on the framebuffer ({kilo_lit} px)")
+
+        # Type text, then save with Ctrl-S (raw mode: the bytes reach
+        # the editor, not the shell's line editor).
+        type_text(sock, "hello")
+        offset = wait_for("/kilo.txt - 1 lines (modified)", offset=offset)
+        sendkey(sock, "ctrl-s")
+        offset = wait_for("bytes written on disk", offset=offset)
+        ok("kilo edits and saves via ftruncate + write")
+
+        # Quit with Ctrl-Q; the console keyboard must return to the
+        # shell, which can then read the saved file back.
+        sendkey(sock, "ctrl-q")
+        time.sleep(1.0)
+        type_text(sock, "cat /kilo.txt\r")
+        offset = wait_for("hello", offset=offset)
+        ok("kilo-saved file reads back through the shell")
 
         # 13. scrollback: overflow the screen, PageUp shows older
         #     lines, PageDown returns to the exact live view.

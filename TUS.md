@@ -282,6 +282,90 @@ Not yet implemented (return -ENOSYS): fork/exec (process model is
 scheduler-based), signals, sockets, readdir/getdents, stat, file
 seeking, time-of-day clocks, threads (clone).
 
+## 4c. Kernel state (v0.6.0 — kilo: a real terminal app, 2026-08-13)
+
+v0.6.0 ports **kilo** (antirez's single-file text editor, ~1100 lines
+of plain C + libc) as a ring-3 musl program. **Zero changes to
+kilo's source** — everything it needs was added to the kernel and the
+musl ABI bridge. The editor runs full-screen on the framebuffer
+console: raw-mode input, escape-sequence keys, ANSI/VT100 output, and
+file save via ftruncate+write. `make test` now verifies the whole
+flow (29/29): open a file, type text, Ctrl-S, Ctrl-Q, read it back.
+
+### 4c.1 Kernel side
+
+- **ANSI/VT100 output engine** (kernel/drivers/fb.c): a CSI state
+  machine inside `fb_putchar` covering everything a full-screen app
+  emits: CUP (`H`/`f`, 1-based), relative moves (`A`/`B`/`C`/`D`),
+  erase display/line/chars (`J`/`K`/`X`), SGR colours (`m`: 0
+  reset, 7 reverse, 30-37/90-97 fg, 40-47/100-107 bg, 39/49
+  default — mapped to the 16-colour VGA palette), cursor visibility
+  (`?25h`/`?25l`) and the alternate screen (`?1049h/l`, `?47h/l`
+  with a full text-buffer save/restore). Unknown sequences are
+  consumed silently. Reverse video is stored as a swapped palette
+  index at write time, so redraws reproduce it without per-cell
+  flags.
+- **Termios on /dev/tty0**: `TCGETS/TCSETS/TCSETSW/TCSETSF`
+  (0x5401-0x5404) and `TIOCGWINSZ` (0x5413) via the tty ioctl. The
+  kernel stores the 57-byte musl x86_64 `struct termios` blob and
+  honours three flags: **ICANON** (off = raw: ESC arrives as a byte,
+  Enter stays `\r`), **ICRNL** (the keyboard produces `\n` for
+  Enter; raw mode converts it to `\r` so kilo sees a real CR) and
+  **ECHO** (canonical programs get typed input echoed; tsh echoes
+  itself, so no double echo). Legacy ESC=EOF for `cat` is kept in
+  canonical mode. isatty() = TCGETS success now works.
+- **Special keys** (keyboard driver): extended scancodes (E0 prefix)
+  become `KBD_EVENT_SPECIAL` events (arrows, Home/End, Ins/Del,
+  PgUp/PgDn) instead of being dropped; PageUp/PageDown are no longer
+  scrollback events (tsh translates them). The tty translates them
+  to the escape sequences a real terminal sends (`ESC[A`… `ESC[3~`,
+  `ESC[5~`, `ESC[6~`), with a pending-byte buffer so read() returns
+  one byte at a time.
+- **Console input ownership** (kernel/drivers/keyboard.c): the shell
+  and a foreground user task would race for keypresses (both block
+  in hlt-waiting loops). `kbd_get_event_owned(pid)` claims the
+  console on first tty read (owner pid); the shell uses
+  `kbd_get_event_shell(pid)` which never claims — it consumes only
+  while the console is free or owned by it. The owner check runs on
+  every wake, so the handover (shell releases in cmd_exec before
+  spawning; task_exit releases on exit) is race-free.
+- **argv forwarding**: `exec <elf> [args...]` passes args through
+  elf_exec → task_create_user, which lays out the standard SysV
+  image (argc/argv pointers/terminator/envp/auxv) and copies the
+  strings at the BOTTOM of the top user-stack page — next to the
+  initial RSP they would be clobbered by the first function calls.
+  argv[0] = program path (musl_hello now reports argc=1).
+- **New syscalls**: `SYS_TIME 16` (seconds since boot, for musl
+  `time()`), `SYS_FTRUNCATE 17` (grow/shrink a file with zero-fill
+  — kilo saves via truncate+write).
+
+### 4c.2 musl side
+
+- `tus_syscall.c` additions: `ftruncate` (77) and `time` (201) map
+  to the new numbers; **`clock_gettime`/`clock_gettime64` (228/403)
+  and `gettimeofday` (96) are emulated in userspace** from SYS_TIME.
+  This matters more than it looks: musl's `time()` is built on
+  `clock_gettime(CLOCK_REALTIME)`, and with ENOSYS it returned
+  uninitialised stack garbage — kilo's status-message row was never
+  drawn. REALTIME and MONOTONIC both map to the boot clock.
+
+### 4c.3 Verified flow (make test, 29/29)
+
+```
+> exec /boot/kilo.elf /kilo.txt
+(kilo draws: tildes, welcome, status bar " /kilo.txt - 0 lines")
+(typing "hello" -> " /kilo.txt - 1 lines (modified)")
+(Ctrl-S -> "5 bytes written on disk")
+(Ctrl-Q -> back to shell)
+> cat /kilo.txt
+hello
+```
+
+### 4c.4 Sources moved
+
+musl-1.2.6/ and kilo/ now live under **sources/** (sources/musl-1.2.6,
+sources/kilo). Makefile paths updated; kilo's own .git was removed.
+
 ## 4a. Kernel state (v0.1.0 — archived 2026-08-12)
 Boots from the ISO in QEMU (BIOS), serial + framebuffer console,
 interrupt-driven PS/2 keyboard, and an interactive `tsh`. Verified by
@@ -389,6 +473,47 @@ interrupt-driven PS/2 keyboard, and an interactive `tsh`. Verified by
 23. **A user task's initial FPU state must be a valid default**
     (MXCSR=0x1F80): fxrstor of a fully zeroed image unmask s all
     SSE exceptions — any NaN in user code then raises #XM.
+24. **musl's `time()` is built on clock_gettime(CLOCK_REALTIME),
+    not the `time` syscall.** Mapping Linux 201 (time) alone is not
+    enough: clock_gettime(228)/clock_gettime64(403)/gettimeofday(96)
+    must be emulated too, or time() returns uninitialised stack
+    garbage (kilo's status message row was silently blank).
+25. **kilo's Enter key is `\r` in raw mode**: the keyboard driver
+    produces `\n`; with ICRNL cleared the tty must convert `\n` →
+    `\r` so the program sees a real CR (kilo's ENTER).
+26. **The initial argv strings must sit at the BOTTOM of the user
+    stack page**, not just below the pointer array: the first ~4 KiB
+    of stack usage (function calls, musl startup) would clobber
+    them. RSP starts at the array; strings live ~4 KiB away.
+27. **Console input needs ownership arbitration**: with two hlt-
+    waiting consumers (shell + foreground task) keypresses split
+    between them nondeterministically. The owner check must run
+    INSIDE the wait loop (re-checked on every wake), and the shell
+    must never claim — otherwise it re-claims before the new task
+    gets its first read and eats all keys.
+28. **`struct kbd_event` layout changed**: adding a `code` field
+    broke `{ KBD_EVENT_CHAR, c }` initializers (c landed in `code`,
+    `c` stayed 0 — keys silently ignored). Designated initializers
+    or a zero-fill are mandatory once a struct has more than one
+    meaning-bearing field.
+29. **Rare #PF in fb_scroll_up's memset (dest ≈ 0x10001054/0x3, len
+    0x23/0x10000070) — ROOT CAUSED AND FIXED**: the round-robin
+    switch stubs (sched_tick_entry, task_exit) saved only the 9
+    caller-saved registers. When the PIT tick preempted ring-0 code
+    mid-function (fb_putchar's inlined scroll) and detoured through
+    a ring-3 task, the user code clobbered rbx/rbp/r12-r15 — and on
+    return the interrupted kernel code continued with the USER task's
+    register values, computing a garbage framebuffer destination
+    (memset into an unmapped user address → #PF). It never showed
+    before because user tasks only ever interrupted code that didn't
+    depend on callee-saved registers (hlt loops, syscall stubs).
+    FIX: FRAME_WORDS 14→20, the stubs push/pop rbx rbp r12-r15, and
+    fresh-task frames zero them. The #PF handler now also saves ALL
+    registers + 24 stack words, which is what cracked this.
+30. **QEMU/process hygiene**: `pkill -f` patterns match your own
+    shell command line — run pkill in a separate exec step, and
+    delete stale serial/QMP/socket files between runs or a watcher
+    reads the previous run's log.
 24. **The initial user stack must be zeroed**: pmm frames are not
     zeroed on allocation. musl's crt1 walks argc/argv and the C
     library scans envp/auxv; garbage there means garbage argc or a

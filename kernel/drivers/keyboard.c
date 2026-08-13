@@ -92,7 +92,7 @@ static void kbd_push_event(const struct kbd_event *ev) {
 }
 
 static void kbd_push_char(char c) {
-    struct kbd_event ev = { KBD_EVENT_CHAR, c };
+    struct kbd_event ev = { KBD_EVENT_CHAR, 0, c };
     kbd_push_event(&ev);
 }
 
@@ -140,16 +140,27 @@ static void kbd_irq_handler(struct interrupt_frame *frame) {
     if (g_extended) {
         g_extended = false;
         if (!(scancode & 0x80)) { /* make (press) only */
-            struct kbd_event ev;
-            if ((scancode & 0x7F) == SC_PAGE_UP) {
-                ev.type = KBD_EVENT_SCROLL_UP;
-                kbd_push_event(&ev);
-            } else if ((scancode & 0x7F) == SC_PAGE_DOWN) {
-                ev.type = KBD_EVENT_SCROLL_DOWN;
+            /* Extended keys: arrows, Home/End, Insert/Delete,
+             * PageUp/PageDown (scancode set 1, E0-prefixed). */
+            static const uint8_t extmap[128] = {
+                [0x47] = KBD_KEY_HOME,
+                [0x4F] = KBD_KEY_END,
+                [0x48] = KBD_KEY_UP,
+                [0x50] = KBD_KEY_DOWN,
+                [0x4B] = KBD_KEY_LEFT,
+                [0x4D] = KBD_KEY_RIGHT,
+                [0x49] = KBD_KEY_PAGE_UP,
+                [0x51] = KBD_KEY_PAGE_DOWN,
+                [0x52] = KBD_KEY_INSERT,
+                [0x53] = KBD_KEY_DELETE,
+            };
+            int key = extmap[scancode & 0x7F];
+            if (key) {
+                struct kbd_event ev = { KBD_EVENT_SPECIAL, key, 0 };
                 kbd_push_event(&ev);
             }
         }
-        return; /* other extended keys (arrows, keypad) are unmapped */
+        return;
     }
 
     bool make = !(scancode & 0x80);
@@ -212,6 +223,62 @@ struct kbd_event kbd_get_event(void) {
     struct kbd_event ev = g_buffer[g_tail];
     g_tail = (g_tail + 1) % KBD_BUFFER_SIZE;
     return ev;
+}
+
+/* ---- console input ownership ---- */
+
+static long g_kbd_owner; /* pid of the foreground console consumer */
+
+void kbd_input_release(long pid) {
+    if (g_kbd_owner == pid) {
+        g_kbd_owner = 0;
+    }
+}
+
+long kbd_input_owner(void) {
+    return g_kbd_owner;
+}
+
+struct kbd_event kbd_get_event_owned(long pid) {
+    for (;;) {
+        /* Claim the console if it is free, otherwise yield until the
+         * owner (or the shell) gives it up. Checking on every wake
+         * is what makes the handover race-free: a task only consumes
+         * events while it is the registered owner. */
+        if (g_kbd_owner == 0) {
+            g_kbd_owner = pid;
+        }
+        if (g_kbd_owner != pid) {
+            hlt();
+            continue;
+        }
+        if (g_head == g_tail) {
+            hlt();
+            continue;
+        }
+        struct kbd_event ev = g_buffer[g_tail];
+        g_tail = (g_tail + 1) % KBD_BUFFER_SIZE;
+        return ev;
+    }
+}
+
+struct kbd_event kbd_get_event_shell(long pid) {
+    for (;;) {
+        /* The shell never claims the console: it consumes only while
+         * it is free or already owned by us, so a foreground user
+         * task can take over on its first read. */
+        if (g_kbd_owner != 0 && g_kbd_owner != pid) {
+            hlt();
+            continue;
+        }
+        if (g_head == g_tail) {
+            hlt();
+            continue;
+        }
+        struct kbd_event ev = g_buffer[g_tail];
+        g_tail = (g_tail + 1) % KBD_BUFFER_SIZE;
+        return ev;
+    }
 }
 
 char kbd_getchar(void) {

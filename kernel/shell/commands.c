@@ -66,7 +66,7 @@ static int cmd_clear(int argc, char **argv) {
 static int cmd_ver(int argc, char **argv) {
     (void)argc;
     (void)argv;
-    kprintf("TUS kernel 0.4.0, built with %s\n", __VERSION__);
+    kprintf("TUS kernel 0.6.0, built with %s\n", __VERSION__);
     return 0;
 }
 

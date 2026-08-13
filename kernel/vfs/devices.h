@@ -17,6 +17,9 @@
 #define FB_IOCTL_GET_INFO 0x1 /* arg: struct fb_device_info * */
 #define FB_IOCTL_FILL     0x2 /* arg: uint32_t rgb color        */
 
+/* Console input ownership is handled by the keyboard driver
+ * (kbd_input_owner/release); see keyboard.h. */
+
 struct fb_device_info {
     uint32_t width;
     uint32_t height;
