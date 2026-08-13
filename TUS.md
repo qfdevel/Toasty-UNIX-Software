@@ -366,6 +366,59 @@ hello
 musl-1.2.6/ and kilo/ now live under **sources/** (sources/musl-1.2.6,
 sources/kilo). Makefile paths updated; kilo's own .git was removed.
 
+## 4d. Kernel state (v0.7.0 — rootfs + boot splash, 2026-08-13)
+
+### 4d.1 Cleaned-up layout, build/ directory
+
+- All compiler output moved to **build/** (`build/kernel/*.o`, `*.d`);
+  the source tree holds only sources. Stale `.o`/`.d`/blob artifacts
+  removed; screenshots moved to docs/.
+
+### 4d.2 rootfs.img — the initial ram filesystem
+
+- **`rootfs.img`** (ustar tar of the `rootfs/` staging dir) is built by
+  `make` and shipped inside `tus.iso` as a **Limine module**
+  (`module_path: boot():/boot/rootfs.img`). The kernel mounts it into
+  the VFS at boot (`kernel/vfs/rootfs.c` parses the tar; files land at
+  `/boot/kilo.elf`, `/logo.ppm`, …).
+- The embedded-blob mechanism (`*_blob.o` → `elf_install_test_program`)
+  is **gone**; user ELFs are built straight into `rootfs/boot/`.
+- Adding a file to the running system = drop it into `rootfs/` and
+  rebuild the ISO. No kernel changes.
+
+### 4d.3 Boot splash — one toast per CPU
+
+- New **Limine MP request** (`limine_mp_request`): the bootloader
+  reports `cpu_count` (4 with `-smp 4`). TUS stays single-CPU: every
+  AP is parked with a `cli; hlt` loop published to its `goto_address`
+  (`park_aps()` in main.c) — no spin waste in TCG.
+- `kernel/boot/splash.c` reads **`/logo.ppm` from the rootfs**, decodes
+  it with the new **PPM driver** (`kernel/drivers/ppm.c`, P3 + P6,
+  any maxval — no build-time arrays), scales it (16.16 fixed point,
+  ≤80% width / ≤45% height, never upscaled) and draws **one toast per
+  CPU** centered across the top. The boot log prints below the logo
+  band (`fb_set_text_top`); after a 2.5 s hold the shell clears the
+  screen and takes over.
+- Logo: `rootfs/logo.ppm` (181x200 P3, ~15k non-black px per toast;
+  the toast art has black padding inside the frame).
+- `make run-smp` boots with `-smp 4` to see four toasts.
+
+### 4d.4 Bug fixed: kfree() on multi-page blocks
+
+The multi-page path of `kfree()` read `b->pages` from the header on
+**every loop iteration**; the first iteration unmaps the page that
+holds the header, so the second read faulted (#PF at boot, CR2 =
+header address). Latent since v0.2.0 — nothing ever freed a >4 KiB
+block until the splash's 300 KB logo buffer. Fix: read `pages` once
+into a local before the loop.
+
+### 4d.5 Verified flow (make test, 31/31)
+
+- `-smp 4`: banner shows `cpu count    : 4`; framebuffer splash shows
+  **four** toasts (~52k warm px) during the hold, then clears to the
+  shell.
+- All v0.6.0 checks still pass (kilo, scrollback, fbfill, panic dump).
+
 ## 4a. Kernel state (v0.1.0 — archived 2026-08-12)
 Boots from the ISO in QEMU (BIOS), serial + framebuffer console,
 interrupt-driven PS/2 keyboard, and an interactive `tsh`. Verified by

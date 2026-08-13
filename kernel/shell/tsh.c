@@ -40,6 +40,9 @@ static void tsh_process_line(void) {
 }
 
 void tsh_run(void) {
+    /* The boot splash (toast logos + boot log) is wiped here: the
+     * shell takes over the whole screen. */
+    console_clear();
     tsh_prompt();
 
     for (;;) {

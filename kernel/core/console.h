@@ -33,6 +33,9 @@ void console_scroll_page(int dir);
 /* Set the foreground/background colors used by the framebuffer console. */
 void console_set_color(uint32_t fg, uint32_t bg);
 
+/* Start the framebuffer text grid below the boot splash logo band. */
+void console_set_text_top(uint32_t pixel_y);
+
 /* True if a framebuffer console is active. */
 bool console_has_framebuffer(void);
 

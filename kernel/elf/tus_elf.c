@@ -29,51 +29,6 @@
  * whole load runs with preemption disabled). */
 static long g_elf_fd = -1;
 
-/* ---- embedded test programs ---- */
-
-/* tests/hello.elf, tests/enforce.elf, tests/musl_hello.elf and
- * tests/kilo.elf linked into the kernel as binary blobs (see
- * Makefile: *_blob.o). Exposed to the VFS at /boot/ so
- * `exec /boot/kilo.elf /test.txt` works out of the box. */
-extern char _binary_tests_hello_elf_start[];
-extern char _binary_tests_hello_elf_end[];
-extern char _binary_tests_enforce_elf_start[];
-extern char _binary_tests_enforce_elf_end[];
-extern char _binary_tests_musl_hello_elf_start[];
-extern char _binary_tests_musl_hello_elf_end[];
-extern char _binary_tests_kilo_elf_start[];
-extern char _binary_tests_kilo_elf_end[];
-
-static void elf_install_blob(const char *path, char *start, char *end) {
-    size_t len = (size_t)(end - start);
-    struct vfs_node *node = vfs_create_file(path);
-    if (node == NULL) {
-        return;
-    }
-    node->data = kmalloc(len);
-    if (node->data == NULL) {
-        return;
-    }
-    memcpy(node->data, start, len);
-    node->size = len;
-    node->capacity = len;
-}
-
-void elf_install_test_program(void) {
-    elf_install_blob("/boot/hello.elf",
-                     _binary_tests_hello_elf_start,
-                     _binary_tests_hello_elf_end);
-    elf_install_blob("/boot/enforce.elf",
-                     _binary_tests_enforce_elf_start,
-                     _binary_tests_enforce_elf_end);
-    elf_install_blob("/boot/musl_hello.elf",
-                     _binary_tests_musl_hello_elf_start,
-                     _binary_tests_musl_hello_elf_end);
-    elf_install_blob("/boot/kilo.elf",
-                     _binary_tests_kilo_elf_start,
-                     _binary_tests_kilo_elf_end);
-}
-
 static bool tus_pread(el_ctx *ctx, void *dest, size_t nb, size_t offset) {
     (void)ctx;
     return vfs_pread(g_elf_fd, dest, nb, offset) == (long)nb;

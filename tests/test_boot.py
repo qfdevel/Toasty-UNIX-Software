@@ -117,6 +117,7 @@ def start_qemu():
             pass
     return subprocess.Popen(
         ["qemu-system-x86_64", "-cdrom", "tus.iso", "-m", "512M",
+         "-smp", "4",
          "-display", "none", "-no-reboot",
          "-serial", f"file:{SERIAL_LOG}",
          "-qmp", f"unix:{QMP_SOCK},server=on,wait=off",
@@ -171,6 +172,21 @@ def count_white_pixels(path):
     return count
 
 
+def count_toast_pixels(path):
+    """P6 PPM: count warm toast-brown/orange pixels (the boot logo)."""
+    with open(path, "rb") as f:
+        data = f.read()
+    parts = data[:200].split()
+    width, height = int(parts[1]), int(parts[2])
+    body = data[data.index(b"\n255\n") + 5:]
+    count = 0
+    for i in range(0, width * height * 3, 3):
+        r, g, b = body[i], body[i + 1], body[i + 2]
+        if r > 100 and 60 < g < 220 and b < 130 and r > g > b:
+            count += 1
+    return count
+
+
 def main():
     assert os.path.exists("tus.iso"), "tus.iso missing - run `make iso` first"
 
@@ -184,6 +200,27 @@ def main():
         sock = qmp_connect()
         ok("QMP connected")
 
+        # 0a. The boot banner reports the CPU count from the Limine MP
+        #     feature (the test boots with -smp 4).
+        with open(SERIAL_LOG, "rb") as f:
+            bootlog = f.read().decode("utf-8", "replace")
+        assert "cpu count    : 4" in bootlog, \
+            "banner does not report 4 CPUs"
+        ok("banner reports 4 CPUs (Limine MP feature)")
+
+        # 0b. Boot splash: "tsh ready" is the last boot log line, printed
+        #     right before the splash hold; grab the framebuffer during
+        #     the hold. Four CPUs must draw four toasts (~50k warm px).
+        screendump(sock, "/tmp/tus-splash.ppm")
+        splash_lit = count_toast_pixels("/tmp/tus-splash.ppm")
+        assert splash_lit > 10000, \
+            f"boot splash toasts not drawn ({splash_lit} toast px)"
+        ok(f"boot splash draws one toast per CPU ({splash_lit} px)")
+
+        # Wait for the shell prompt (the splash hold ends, console is
+        # cleared and tsh takes over) before typing anything.
+        offset = wait_for("tus:/>", offset=offset)
+
         # 1. help
         type_text(sock, "help\r")
         offset = wait_for("Available commands:", offset=offset)
@@ -195,9 +232,9 @@ def main():
         offset = wait_for("hi", offset=offset)
         ok("echo prints its arguments")
 
-        # 3. ver (0.6.0 now)
+        # 3. ver (0.7.0 now)
         type_text(sock, "ver\r")
-        offset = wait_for("TUS kernel 0.6.0", offset=offset)
+        offset = wait_for("TUS kernel 0.7.0", offset=offset)
         ok("ver reports the kernel version")
 
         # 4. sysinfo (now with PMM stats and uptime)

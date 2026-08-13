@@ -39,6 +39,15 @@ void fb_set_color(uint32_t fg, uint32_t bg);
  * buffer is untouched so on-screen text survives a redraw). */
 void fb_fill(uint32_t color);
 
+/* Start the text grid this many pixels below the top of the screen
+ * (used by the boot splash, which draws logos above the logs). */
+void fb_set_text_top(uint32_t pixel_y);
+
+/* Draw a scaled RGB image (nearest neighbour) at (x, y). `scale` is
+ * 16.16 fixed point (1:1 = 65536). */
+void fb_blit_scaled(uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                    const uint8_t *rgb, uint32_t scale);
+
 /* Copy the framebuffer description; any pointer may be NULL. */
 void fb_get_info(uint32_t *width, uint32_t *height, uint32_t *bpp,
                  uint64_t *pitch, void **address);

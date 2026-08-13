@@ -49,6 +49,12 @@ void console_set_color(uint32_t fg, uint32_t bg) {
     }
 }
 
+void console_set_text_top(uint32_t pixel_y) {
+    if (g_fb_active) {
+        fb_set_text_top(pixel_y);
+    }
+}
+
 bool console_has_framebuffer(void) {
     return g_fb_active;
 }

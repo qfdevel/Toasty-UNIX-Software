@@ -12,8 +12,4 @@
  * Returns 0 on success, a negative errno otherwise. */
 long elf_exec(const char *path, int argc, char **argv);
 
-/* Install the embedded test binary (tests/hello.elf) into the VFS
- * at /boot/hello.elf. Called once after vfs_init(). */
-void elf_install_test_program(void);
-
 #endif /* TUS_ELF_TUS_ELF_H */

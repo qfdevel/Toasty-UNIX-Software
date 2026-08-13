@@ -18,6 +18,7 @@
 #include "arch/x86_64/idt.h"
 #include "arch/x86_64/io.h"
 #include "arch/x86_64/pic.h"
+#include "boot/splash.h"
 #include "core/bootinfo.h"
 #include "core/console.h"
 #include "core/klib.h"
@@ -30,6 +31,7 @@
 #include "mm/vmm.h"
 #include "sched/sched.h"
 #include "shell/tsh.h"
+#include "vfs/rootfs.h"
 #include "vfs/vfs.h"
 
 /* ---- Limine boot protocol requests ----
@@ -58,6 +60,18 @@ static volatile struct limine_bootloader_info_request bootloader_info_request = 
 };
 
 __attribute__((used, section(".requests")))
+static volatile struct limine_mp_request mp_request = {
+    .id = LIMINE_MP_REQUEST_ID,
+    .revision = 0
+};
+
+__attribute__((used, section(".requests")))
+static volatile struct limine_module_request module_request = {
+    .id = LIMINE_MODULE_REQUEST_ID,
+    .revision = 0
+};
+
+__attribute__((used, section(".requests")))
 static volatile struct limine_hhdm_request hhdm_request = {
     .id = LIMINE_HHDM_REQUEST_ID,
     .revision = 0
@@ -74,6 +88,10 @@ static volatile uint64_t limine_base_revision[3] = LIMINE_BASE_REVISION(2);
 /* Single source of truth about what the bootloader gave us. */
 struct bootinfo g_bootinfo;
 
+/* How long the boot splash (toasts + boot log) stays on screen
+ * before the shell clears it, in milliseconds. */
+#define BOOT_SPLASH_HOLD_MS 2500
+
 static void fill_bootinfo(void) {
     g_bootinfo.bootloader_name = bootloader_info_request.response != NULL
         ? bootloader_info_request.response->name : NULL;
@@ -87,6 +105,20 @@ static void fill_bootinfo(void) {
     g_bootinfo.hhdm_offset = hhdm_request.response != NULL
         ? hhdm_request.response->offset : 0;
 
+    /* CPU count from the MP feature (includes the BSP). TUS itself is
+     * single-CPU for now; the count drives the boot splash (one toast
+     * per core) and the banner. */
+    g_bootinfo.cpu_count = (mp_request.response != NULL)
+        ? mp_request.response->cpu_count : 1;
+
+    /* rootfs.img, loaded by Limine as the first module. */
+    if (module_request.response != NULL &&
+        module_request.response->module_count > 0) {
+        g_bootinfo.rootfs_module = module_request.response->modules[0];
+    } else {
+        g_bootinfo.rootfs_module = NULL;
+    }
+
     uint64_t total = 0;
     if (memmap_request.response != NULL) {
         for (uint64_t i = 0; i < memmap_request.response->entry_count; i++) {
@@ -97,6 +129,32 @@ static void fill_bootinfo(void) {
         }
     }
     g_bootinfo.usable_memory_bytes = total;
+}
+
+/* Park every application processor: the bootloader starts the APs and
+ * they spin on their goto_address until we publish one. TUS does not
+ * use the APs yet, so we hand them a trivial cli/hlt loop - they stay
+ * out of the way (and out of the TCG's way) instead of burning cycles. */
+static void ap_park(struct limine_mp_info *cpu) {
+    (void)cpu;
+    for (;;) {
+        asm volatile("cli; hlt");
+    }
+}
+
+static void park_aps(void) {
+    if (mp_request.response == NULL) {
+        return;
+    }
+    for (uint64_t i = 0; i < mp_request.response->cpu_count; i++) {
+        struct limine_mp_info *cpu = mp_request.response->cpus[i];
+        if (cpu == NULL) {
+            continue;
+        }
+        /* The BSP's goto_address is unused by the bootloader; setting
+         * it is harmless and keeps the loop simple. */
+        __atomic_store_n(&cpu->goto_address, ap_park, __ATOMIC_SEQ_CST);
+    }
 }
 
 static void print_boot_banner(void) {
@@ -112,6 +170,7 @@ static void print_boot_banner(void) {
     console_write("------------------------------------------------\n");
     kprintf("bootloader   : %s %s\n", name, version);
     console_write("architecture : x86_64 (AMD64)\n");
+    kprintf("cpu count    : %llu\n", (unsigned long long)g_bootinfo.cpu_count);
     kprintf("memory       : %llu MiB usable\n",
             (unsigned long long)(g_bootinfo.usable_memory_bytes / (1024 * 1024)));
     if (g_bootinfo.framebuffer != NULL) {
@@ -143,6 +202,7 @@ void _start(void) {
     cli(); /* build a clean interrupt environment */
 
     fill_bootinfo();
+    park_aps(); /* APs halt in cli/hlt until the (single-CPU) kernel */
     console_init(g_bootinfo.framebuffer);
 
     /* Own GDT (kernel + user segments + TSS) before any interrupt
@@ -160,7 +220,16 @@ void _start(void) {
     pit_init();
     kbd_init();
     vfs_init();
-    elf_install_test_program();
+
+    /* Mount the root filesystem (rootfs.img, a Limine module) and
+     * draw the boot splash: one toast per CPU, boot logs below. */
+    if (g_bootinfo.rootfs_module != NULL) {
+        vfs_mount_rootfs(g_bootinfo.rootfs_module->address,
+                         g_bootinfo.rootfs_module->size);
+    } else {
+        console_write("rootfs       : not loaded (no Limine module)\n");
+    }
+    splash_show(g_bootinfo.cpu_count);
 
     /* SSE for user programs: the C library uses SSE2 instructions
      * (memcpy, string ops, math). The scheduler now saves/restores
@@ -174,6 +243,16 @@ void _start(void) {
     print_boot_banner();
 
     sti();
+
+    /* Keep the boot splash (toast logos + boot log) on screen for a
+     * moment before the shell takes over and clears it. The pause is
+     * preempt-disabled so the timer tick cannot switch tasks while we
+     * are still inside kernel boot code; pit_tick() still advances
+     * the counter, so the sleep terminates normally. */
+    preempt_disable();
+    timer_sleep_ms(BOOT_SPLASH_HOLD_MS);
+    preempt_enable();
+
     tsh_run();
 
     /* tsh_run() never returns; this is just a safety net. */

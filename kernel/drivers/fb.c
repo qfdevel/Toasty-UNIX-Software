@@ -50,6 +50,11 @@ static uint64_t g_pitch_words; /* pitch divided by 4 */
 static uint32_t g_width;
 static uint32_t g_height;
 
+/* Pixel row where the text grid starts. The boot splash draws logos
+ * in the band above this offset; text rendering, scrolling and the
+ * scrollback redraw all work below it. fb_clear() resets it to 0. */
+static uint32_t g_text_top;
+
 static int g_cols;
 static int g_rows;
 static int g_cursor_x;
@@ -472,7 +477,8 @@ static void fb_paint_cell(int row, int col, const struct fb_cell *cell,
     }
 
     const uint8_t *glyph = font8x16[uc - FONT_FIRST];
-    uint32_t *pixel = g_pixels + (uint64_t)(row * FONT_HEIGHT) * g_pitch_words
+    uint32_t *pixel = g_pixels
+                    + (uint64_t)(g_text_top + (uint32_t)row * FONT_HEIGHT) * g_pitch_words
                     + (uint64_t)col * FONT_WIDTH;
 
     for (int y = 0; y < FONT_HEIGHT; y++) {
@@ -559,7 +565,9 @@ bool fb_view_scrolled(void) {
     return g_view_back != 0;
 }
 
-/* Move every row up by one and clear the bottom row. */
+/* Move every row up by one and clear the bottom row. The pixel
+ * shift only touches the text region (below g_text_top), so the boot
+ * splash logos above it stay put. */
 static void fb_scroll_up(void) {
     for (int row = 1; row < g_rows; row++) {
         memcpy(g_text[row - 1], g_text[row],
@@ -570,7 +578,7 @@ static void fb_scroll_up(void) {
         g_text[g_rows - 1][col] = blank;
     }
 
-    uint8_t *bytes = (uint8_t *)g_pixels;
+    uint8_t *bytes = (uint8_t *)g_pixels + (uint64_t)g_text_top * g_pitch_bytes;
     uint64_t line_bytes = (uint64_t)FONT_HEIGHT * g_pitch_bytes;
     uint64_t total_bytes = (uint64_t)(g_rows - 1) * line_bytes;
     memmove(bytes, bytes + line_bytes, total_bytes);
@@ -614,6 +622,7 @@ void fb_clear(void) {
         }
     }
     memset(g_pixels, 0, (size_t)(g_pitch_bytes * g_height));
+    g_text_top = 0; /* the splash band only exists during boot */
     g_cursor_x = 0;
     g_cursor_y = 0;
     g_hist_head = 0;
@@ -705,6 +714,54 @@ void fb_fill(uint32_t color) {
     uint64_t words = (g_pitch_bytes / 4) * g_height;
     for (uint64_t i = 0; i < words; i++) {
         p[i] = color;
+    }
+}
+
+/* Start the text grid `pixel_y` pixels below the top of the screen
+ * (the boot splash draws its logos above this line). */
+void fb_set_text_top(uint32_t pixel_y) {
+    g_text_top = pixel_y;
+}
+
+/* Draw a scaled RGB image (nearest neighbour) with its top-left
+ * corner at (x, y). `scale` is a 16.16 fixed-point factor: an output
+ * pixel of size 1x1 samples src[oy*scale>>16][ox*scale>>16]. */
+void fb_blit_scaled(uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                    const uint8_t *rgb, uint32_t scale) {
+    if (g_pixels == NULL || rgb == NULL || scale == 0) {
+        return;
+    }
+
+    uint32_t out_w = (uint32_t)(((uint64_t)w * scale) >> 16);
+    uint32_t out_h = (uint32_t)(((uint64_t)h * scale) >> 16);
+    if (out_w == 0 || out_h == 0) {
+        return;
+    }
+
+    for (uint32_t oy = 0; oy < out_h; oy++) {
+        uint32_t sy = (uint32_t)(((uint64_t)oy * h) / out_h);
+        if (sy >= h) {
+            sy = h - 1;
+        }
+        uint32_t py = y + oy;
+        if (py >= g_height) {
+            break;
+        }
+        const uint8_t *src_row = rgb + (uint64_t)sy * w * 3;
+        uint32_t *dst = g_pixels + (uint64_t)py * g_pitch_words + x;
+
+        for (uint32_t ox = 0; ox < out_w; ox++) {
+            uint32_t sx = (uint32_t)(((uint64_t)ox * w) / out_w);
+            if (sx >= w) {
+                sx = w - 1;
+            }
+            uint32_t px = x + ox;
+            if (px >= g_width) {
+                break;
+            }
+            const uint8_t *s = src_row + (uint64_t)sx * 3;
+            dst[ox] = ((uint32_t)s[0] << 16) | ((uint32_t)s[1] << 8) | s[2];
+        }
     }
 }
 

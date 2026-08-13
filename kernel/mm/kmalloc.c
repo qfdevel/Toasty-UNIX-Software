@@ -141,10 +141,14 @@ void kfree(void *ptr) {
     }
     struct block *b = (struct block *)((uint8_t *)ptr - HEADER_SIZE);
 
-    /* Multi-page block: release its frames back to the PMM. */
+    /* Multi-page block: release its frames back to the PMM. The page
+     * count is read ONCE before the loop - the first iteration unmaps
+     * the page that holds the header, so re-reading b->pages from
+     * memory afterwards would fault. */
     if (b->pages > 0) {
+        size_t pages = b->pages;
         uint64_t virt = (uint64_t)(uintptr_t)b;
-        for (size_t i = 0; i < b->pages; i++) {
+        for (size_t i = 0; i < pages; i++) {
             uint64_t phys = vmm_translate(virt + i * PAGE_SIZE);
             if (phys != 0) {
                 vmm_unmap_page(virt + i * PAGE_SIZE);

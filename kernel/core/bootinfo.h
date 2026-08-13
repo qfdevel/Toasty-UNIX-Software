@@ -19,6 +19,8 @@ struct bootinfo {
     struct limine_framebuffer *framebuffer;      /* NULL if absent  */
     uint64_t usable_memory_bytes;                /* sum of usable RAM */
     uint64_t hhdm_offset;                        /* phys -> higher-half */
+    uint64_t cpu_count;                          /* BSP + APs (MP feature) */
+    struct limine_file *rootfs_module;           /* boot():/boot/rootfs.img */
 };
 
 extern struct bootinfo g_bootinfo;

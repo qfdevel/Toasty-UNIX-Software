@@ -1,16 +1,23 @@
 # Build artifacts
 *.o
+*.d
 kernel.elf
 tus.iso
+rootfs.img
 iso_root/
+build/
+
+# Rootfs staging: user binaries are built into rootfs/boot/
+rootfs/boot/*.elf
 
 # Logs
 *.log
+
 # musl build outputs (source tree stays committed, artifacts don't)
 musl-out/
 sources/musl-1.2.6/obj/
 sources/musl-1.2.6/lib/
 sources/musl-1.2.6/config.mak
 sources/musl-1.2.6/include/bits/
-*.d
+
 musl-1.2.6.tar.gz
