@@ -47,7 +47,9 @@ DEPS        := $(KERNEL_OBJS:.o=.d)
 # Root filesystem: rootfs/ is tarred into rootfs.img (ustar format,
 # parsed by kernel/vfs/rootfs.c). The user programs are built straight
 # into rootfs/boot/, so the ISO ships exactly the files the running
-# system sees at /boot.
+# system sees at /boot. The empty base directories (dev, tmp) are
+# created here - git does not track empty dirs - and end up in the
+# image, so the kernel does not hardcode the directory tree.
 ROOTFS_DIR   := rootfs
 ROOTFS_IMG   := rootfs.img
 ROOTFS_FILES := $(shell find $(ROOTFS_DIR) -type f 2>/dev/null)
@@ -116,6 +118,7 @@ $(ROOTFS_DIR)/boot/kilo.elf: sources/kilo/kilo.c $(MUSL_LIB)/libc.a
 # ---- rootfs image ----
 
 $(ROOTFS_IMG): $(USER_ELFS) $(ROOTFS_FILES)
+	mkdir -p $(ROOTFS_DIR)/dev $(ROOTFS_DIR)/tmp $(ROOTFS_DIR)/etc $(ROOTFS_DIR)/boot
 	tar --format=ustar -C $(ROOTFS_DIR) -cf $@ .
 
 # Header dependency tracking: rebuild objects when the headers they

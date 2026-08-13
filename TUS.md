@@ -381,10 +381,21 @@ sources/kilo). Makefile paths updated; kilo's own .git was removed.
   (`module_path: boot():/boot/rootfs.img`). The kernel mounts it into
   the VFS at boot (`kernel/vfs/rootfs.c` parses the tar; files land at
   `/boot/kilo.elf`, `/logo.ppm`, …).
+- **The whole directory tree comes from the image**: `/dev`, `/tmp`,
+  `/etc` and `/boot` are tar entries (empty dirs are created by the
+  Makefile before packing; git does not track empty dirs), and
+  `/etc/motd` is a real file in rootfs/. The kernel does **not**
+  hardcode the base directories - `vfs_init()` only creates the root
+  node, the rootfs mount provides the tree, and `vfs_devices_init()`
+  registers the device nodes afterwards (with a tiny ensure-dirs
+  fallback that only fires when the module is missing, keeping the
+  serial-only debug path alive).
 - The embedded-blob mechanism (`*_blob.o` → `elf_install_test_program`)
   is **gone**; user ELFs are built straight into `rootfs/boot/`.
 - Adding a file to the running system = drop it into `rootfs/` and
   rebuild the ISO. No kernel changes.
+- **Tar quirk**: directory entries carry a trailing slash (`boot/`);
+  the parser strips it before creating the node.
 
 ### 4d.3 Boot splash — one toast per CPU
 

@@ -255,11 +255,16 @@ def main():
         offset = wait_for("uptime:", offset=offset)
         ok("uptime reports elapsed time via the PIT")
 
-        # 7. VFS: ls /
+        # 7. VFS: ls / (the whole tree now comes from rootfs.img:
+        #    dev, tmp, etc, boot + logo.ppm; listing order follows
+        #    the tar's entry order, so dev comes before etc, logo.ppm
+        #    before boot)
         type_text(sock, "ls /\r")
-        offset = wait_for("etc", offset=offset)
         offset = wait_for("dev", offset=offset)
-        ok("ls / lists the root directory tree")
+        offset = wait_for("etc", offset=offset)
+        offset = wait_for("logo.ppm", offset=offset)
+        offset = wait_for("boot", offset=offset)
+        ok("ls / lists the rootfs tree (dev tmp etc boot + logo.ppm)")
 
         # 8. VFS: ls /dev shows the device nodes (list order is
         #    reverse creation order: zero, null, serial0, kbd0, tty0, fb0)

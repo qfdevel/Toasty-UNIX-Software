@@ -517,16 +517,14 @@ long vfs_unlink(const char *path) {
 
 /* ---- tree construction ---- */
 
-static void seed_file(const char *path, const char *contents) {
-    struct vfs_node *node = vfs_create_file(path);
-    if (node != NULL) {
-        size_t len = strlen(contents);
-        node->data = kmalloc(len + 1);
-        if (node->data != NULL) {
-            memcpy(node->data, contents, len + 1);
-            node->size = len;
-            node->capacity = len + 1;
-        }
+/* Ensure a base directory exists. This is the safety net for a boot
+ * without a rootfs module: normally /dev, /tmp, /etc and /boot all
+ * come from rootfs.img (see kernel/vfs/rootfs.c), and this does
+ * nothing. Only when the module is missing are the directories
+ * recreated here so the system can still boot (serial-only). */
+static void ensure_dir(const char *path) {
+    if (vfs_lookup(path) == NULL) {
+        vfs_create_dir(path);
     }
 }
 
@@ -538,18 +536,22 @@ void vfs_init(void) {
     memset(g_root, 0, sizeof(*g_root));
     g_root->type = VFS_DIR;
     memcpy(g_root->name, "/", 2);
+}
 
-    vfs_create_dir("/dev");
-    vfs_create_dir("/tmp");
-    vfs_create_dir("/boot");
-    vfs_create_dir("/etc");
+/* Second init stage, run AFTER the rootfs module is mounted: the
+ * directory tree (/dev, /tmp, /etc, /boot) comes from rootfs.img,
+ * then the built-in device nodes are registered and the standard
+ * descriptors are wired to the console. */
+void vfs_devices_init(void) {
+    /* Fallback only: normally these directories already exist
+     * because rootfs.img provided them. */
+    ensure_dir("/dev");
+    ensure_dir("/tmp");
+    ensure_dir("/etc");
+    ensure_dir("/boot");
 
     /* Populate /dev with the built-in devices. */
     devices_init();
-
-    /* Seed a small motd so `cat /etc/motd` works right away. */
-    seed_file("/etc/motd", "Welcome to TUS - Toasty Unix Software.\n"
-                            "\"Work everywhere, but work right.\"\n");
 
     /* Standard descriptors: stdin/stdout/stderr on the console. */
     struct vfs_node *tty0 = vfs_lookup("/dev/tty0");

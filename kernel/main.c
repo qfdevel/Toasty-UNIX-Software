@@ -221,14 +221,20 @@ void _start(void) {
     kbd_init();
     vfs_init();
 
-    /* Mount the root filesystem (rootfs.img, a Limine module) and
-     * draw the boot splash: one toast per CPU, boot logs below. */
+    /* Mount the root filesystem (rootfs.img, a Limine module): the
+     * directory tree (/dev, /tmp, /etc, /boot) and the OS files
+     * (user programs, motd, boot logo) come from the image, not from
+     * hardcoded kernel code. Device nodes are registered afterwards,
+     * once /dev exists. */
     if (g_bootinfo.rootfs_module != NULL) {
         vfs_mount_rootfs(g_bootinfo.rootfs_module->address,
                          g_bootinfo.rootfs_module->size);
     } else {
         console_write("rootfs       : not loaded (no Limine module)\n");
     }
+    vfs_devices_init();
+
+    /* Draw the boot splash: one toast per CPU, boot logs below. */
     splash_show(g_bootinfo.cpu_count);
 
     /* SSE for user programs: the C library uses SSE2 instructions

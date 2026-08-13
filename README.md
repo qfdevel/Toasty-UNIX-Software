@@ -36,8 +36,11 @@ codebase.
   cap) with split/coalesce/krealloc; multi-page blocks are released
   frame by frame on `kfree`
 - **PIT timer** - 100 Hz IRQ0, `uptime`, `sleep`
-- **Virtual file system** - ramfs tree: `/dev` (6 devices), `/tmp`,
-  `/boot`, `/etc/motd`; fd table with stdin/stdout/stderr on `/dev/tty0`
+- **Virtual file system** - ramfs tree over the rootfs image: the
+  base directories (`/dev`, `/tmp`, `/etc`, `/boot`) and the OS files
+  (user programs, `motd`, boot logo) come from `rootfs.img`, not from
+  hardcoded kernel code; fd table with stdin/stdout/stderr on
+  `/dev/tty0`
 - **Device nodes** - `/dev/fb0` (pixel read/write + `fbfill` ioctl),
   `/dev/tty0`, `/dev/kbd0`, `/dev/serial0`, `/dev/null`, `/dev/zero`
 - **Syscalls** - POSIX-style `int $0x80` ABI (exit, read, write, open,
@@ -150,12 +153,16 @@ make test
 `rootfs.img` is a ustar tar archive of the `rootfs/` directory, built
 by `make` and shipped inside `tus.iso`. Limine loads it as a module
 (`module_path: boot():/boot/rootfs.img` in `limine.conf`) and the
-kernel parses it into the VFS at boot (`kernel/vfs/rootfs.c`). To add
-a file to the running system, drop it into `rootfs/` and rebuild the
-ISO - no kernel changes needed. The boot logo is read from
-`/logo.ppm` at boot and decoded with the built-in PPM driver
-(`kernel/drivers/ppm.c`, P3 and P6), so the splash image can be
-replaced by editing `rootfs/logo.ppm`.
+kernel parses it into the VFS at boot (`kernel/vfs/rootfs.c`). The
+**entire directory tree** (`/dev`, `/tmp`, `/etc`, `/boot` - the empty
+dirs are added by the Makefile before packing) and all OS files
+(user programs, `/etc/motd`, the boot logo) live in the image, so the
+kernel has no hardcoded filesystem layout. To add a file to the
+running system, drop it into `rootfs/` and rebuild the ISO - no
+kernel changes needed. The boot logo is read from `/logo.ppm` at boot
+and decoded with the built-in PPM driver (`kernel/drivers/ppm.c`, P3
+and P6), so the splash image can be replaced by editing
+`rootfs/logo.ppm`.
 
 ## Building a userspace C program (musl)
 

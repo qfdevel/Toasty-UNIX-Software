@@ -67,8 +67,14 @@ struct vfs_node {
     struct vfs_node *child;   /* first entry inside a directory */
 };
 
-/* Build the root tree and register the built-in devices. */
+/* Build the root node. The directory tree is mounted afterwards
+ * from rootfs.img (vfs_mount_rootfs). */
 void vfs_init(void);
+
+/* Register the built-in device nodes and wire stdin/stdout/stderr.
+ * Must run after the rootfs mount (the base directories come from
+ * the image; they are recreated here only as a fallback). */
+void vfs_devices_init(void);
 
 /* ---- node creation ---- */
 

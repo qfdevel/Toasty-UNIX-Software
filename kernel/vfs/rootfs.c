@@ -50,17 +50,27 @@ static uint64_t tar_octal(const char *field, size_t len) {
     return v;
 }
 
-/* Normalise an archive path: strip a leading "./" (tar emits it for
- * the archive root), keep everything else relative. Returns the name
- * to look up under the VFS root, or NULL for the archive root itself. */
-static const char *tar_normalise(const char *name) {
+/* Normalise an archive name into `buf`: strip the leading "./" (tar
+ * emits it for the archive root), drop any trailing slashes (tar
+ * writes directory entries as "boot/") and NUL-terminate. Returns
+ * NULL for the archive root itself, otherwise a pointer to buf. */
+static const char *tar_normalise(const char *name, char *buf, size_t buf_size) {
     if (name[0] == '.' && name[1] == '/') {
         name += 2;
     }
-    if (*name == '\0') {
+    size_t len = 0;
+    while (name[len] != '\0' && len + 1 < buf_size) {
+        len++;
+    }
+    while (len > 0 && name[len - 1] == '/') {
+        len--; /* directory entries carry a trailing slash */
+    }
+    if (len == 0) {
         return NULL; /* the archive root is the VFS root */
     }
-    return name;
+    memcpy(buf, name, len);
+    buf[len] = '\0';
+    return buf;
 }
 
 int vfs_mount_rootfs(const void *image, size_t size) {
@@ -88,10 +98,11 @@ int vfs_mount_rootfs(const void *image, size_t size) {
         char type = (char)p[156];
         uint64_t fsize = tar_octal((const char *)p + 124, 12);
 
-        const char *path = tar_normalise(name);
+        char name_buf[101];
+        const char *path = tar_normalise(name, name_buf, sizeof(name_buf));
         if (path != NULL) {
             if (type == '5') {
-                /* Directory entry (name has a trailing '/'). */
+                /* Directory entry. */
                 vfs_create_dir(path);
             } else if (type == '0' || type == '\0') {
                 /* Regular file. */
