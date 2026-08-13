@@ -19,10 +19,14 @@
 #include <stdbool.h>
 
 #include "../arch/x86_64/io.h"
+#include "../core/bootinfo.h"
 #include "../core/errno.h"
 #include "../drivers/pit.h"
+#include "../mm/pmm.h"
+#include "../mm/vmm.h"
 #include "../sched/sched.h"
 #include "../vfs/vfs.h"
+#include "../core/klib.h"
 
 /* Register image as pushed by syscall_entry() (lowest address first).
  * The caller's CS is passed as a separate argument to the dispatcher
@@ -73,10 +77,151 @@ static bool access_ok(bool from_user, const void *ptr, size_t len) {
     return e >= a && e <= USER_HALF_MAX;
 }
 
+/* arch_prctl operations (Linux-compatible subset). */
+#define ARCH_SET_FS 0x1002
+#define ARCH_GET_FS 0x1003
+
+/* IA32_FS_BASE model-specific register. */
+#define MSR_FS_BASE 0xC0000100
+
+/* mmap flags (Linux subset understood by userspace). */
+#define MAP_ANONYMOUS 0x20
+
+/* Initial address for anonymous mmap allocations. Every task has its
+ * own address space, so all tasks can use the same cursor; it grows
+ * upward from here (ELF images live at 0x10000000, the user stack at
+ * 0x60000000, so this range is free). */
+#define MMAP_CURSOR_START 0x40000000ull
+
+/* ------------------------------------------------------------------ */
+
+static long sys_munmap(long addr, long len);
+
 /* exit(status): terminate the current task and switch to the next.
  * Never returns. */
 __attribute__((noreturn)) static long sys_exit(int status) {
     task_exit(status);
+}
+
+/* mmap(addr, len, prot, flags): anonymous private mapping of zeroed
+ * pages inside the calling task's address space. If addr is 0 a free
+ * region is chosen (per-task cursor); file-backed mappings are not
+ * supported yet and return -ENODEV. Returns the mapping address or a
+ * negative errno. */
+static long sys_mmap(long addr, long len, long prot, long flags) {
+    (void)prot;
+    struct task *cur = sched_current();
+    if (cur == NULL || len <= 0) {
+        return -EINVAL;
+    }
+    if ((flags & MAP_ANONYMOUS) == 0) {
+        return -EINVAL; /* file-backed mmap not implemented yet */
+    }
+
+    uint64_t start = (uint64_t)addr;
+    uint64_t bytes = (uint64_t)len;
+    if (start == 0) {
+        start = cur->mmap_cur;
+    }
+    if ((start & 0xFFF) != 0) {
+        return -EINVAL;
+    }
+    bytes = (bytes + 0xFFF) & ~0xFFFull;
+    if (start + bytes > USER_HALF_MAX || start + bytes < start) {
+        return -ENOMEM;
+    }
+
+    for (uint64_t page = start; page < start + bytes; page += 0x1000) {
+        uint64_t frame = pmm_alloc_frame();
+        if (frame == 0) {
+            /* Roll back what we mapped so far. */
+            sys_munmap(start, (long)(page - start));
+            return -ENOMEM;
+        }
+        /* Fresh anonymous pages must read as zeros. */
+        memset((void *)pmm_phys_to_virt(frame), 0, 4096);
+        if (vmm_map_page_in(cur->cr3, page, frame,
+                            VMM_PRESENT | VMM_WRITE | VMM_USER) != 0) {
+            pmm_free_frame(frame);
+            sys_munmap(start, (long)(page - start));
+            return -ENOMEM;
+        }
+    }
+    cur->mmap_cur = start + bytes;
+    return (long)start;
+}
+
+/* munmap(addr, len): unmap anonymous pages in the calling task's
+ * space and return their frames to the PMM. */
+static long sys_munmap(long addr, long len) {
+    struct task *cur = sched_current();
+    if (cur == NULL || len <= 0 || (addr & 0xFFF) != 0) {
+        return -EINVAL;
+    }
+    uint64_t start = (uint64_t)addr;
+    uint64_t bytes = ((uint64_t)len + 0xFFF) & ~0xFFFull;
+    if (start + bytes > USER_HALF_MAX || start + bytes < start) {
+        return -EINVAL;
+    }
+    for (uint64_t page = start; page < start + bytes; page += 0x1000) {
+        uint64_t phys = vmm_translate_in(cur->cr3, page);
+        if (phys == 0) {
+            continue; /* not mapped: nothing to do */
+        }
+        vmm_unmap_page_in(cur->cr3, page);
+        pmm_free_frame(phys & ~0xFFFull);
+    }
+    return 0;
+}
+
+/* arch_prctl(op, addr): thread-control operations. Only the FS base
+ * (the thread pointer that the C library stores its TLS in) is
+ * supported: ARCH_SET_FS writes the MSR immediately (the scheduler
+ * reloads it on every task switch), ARCH_GET_FS reads it back. */
+static long sys_arch_prctl(long op, long addr, bool from_user) {
+    struct task *cur = sched_current();
+    if (cur == NULL) {
+        return -EINVAL;
+    }
+    if (op == ARCH_SET_FS) {
+        cur->fs_base = (uint64_t)addr;
+        wrmsr(MSR_FS_BASE, (uint64_t)addr);
+        return 0;
+    }
+    if (op == ARCH_GET_FS) {
+        if (!access_ok(from_user, (void *)addr, 8)) {
+            return -EFAULT;
+        }
+        *(uint64_t *)(uintptr_t)addr = cur->fs_base;
+        return 0;
+    }
+    return -EINVAL;
+}
+
+/* writev(fd, iov, count): scatter write. The iovec array lives in
+ * user memory and each segment is validated before it is written. */
+static long sys_writev(long fd, void *iov, long count, bool from_user) {
+    if (count < 0 || count > 256) {
+        return -EINVAL;
+    }
+    size_t bytes = (size_t)count * 16; /* struct iovec { base; len; } */
+    if (!access_ok(from_user, iov, bytes)) {
+        return -EFAULT;
+    }
+    long total = 0;
+    for (long i = 0; i < count; i++) {
+        uint64_t base = ((uint64_t *)iov)[2 * i];
+        uint64_t len = ((uint64_t *)iov)[2 * i + 1];
+        if (!access_ok(from_user, (void *)base, (size_t)len)) {
+            return total > 0 ? total : -EFAULT;
+        }
+        long n = vfs_write(fd, (const void *)base, (size_t)len);
+        if (n < 0) {
+            return total > 0 ? total : n;
+        }
+        total += n;
+    }
+    return total;
 }
 
 long syscall_dispatch(struct syscall_regs *r, uint64_t cs) {
@@ -131,6 +276,14 @@ long syscall_dispatch(struct syscall_regs *r, uint64_t cs) {
             return -EFAULT;
         }
         return vfs_readdir((int)r->rdi, (void *)r->rsi, (size_t)r->rdx);
+    case SYS_MMAP:
+        return sys_mmap(r->rdi, r->rsi, r->rdx, r->r10);
+    case SYS_MUNMAP:
+        return sys_munmap(r->rdi, r->rsi);
+    case SYS_ARCH_PRCTL:
+        return sys_arch_prctl(r->rdi, r->rsi, from_user);
+    case SYS_WRITEV:
+        return sys_writev(r->rdi, (void *)r->rsi, r->rdx, from_user);
     default:
         return -ENOSYS;
     }

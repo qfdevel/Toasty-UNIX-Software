@@ -30,6 +30,11 @@
 #define SYS_MKDIR   9
 #define SYS_UNLINK  10
 #define SYS_READDIR 11
+/* v0.5.0: userspace libc (musl) support. */
+#define SYS_MMAP     12 /* mmap(addr, len, prot, flags) - anonymous only */
+#define SYS_MUNMAP   13 /* munmap(addr, len) */
+#define SYS_ARCH_PRCTL 14 /* arch_prctl(op, addr) - ARCH_SET_FS/ARCH_GET_FS */
+#define SYS_WRITEV   15 /* writev(fd, iovec*, count) */
 
 /* IDT entry stub (vector 0x80). Installed by idt_init(). */
 void syscall_entry(void);

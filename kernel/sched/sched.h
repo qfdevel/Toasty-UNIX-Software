@@ -45,6 +45,21 @@ struct task {
      * shared with the root space, the user half is private. */
     uint64_t cr3;
 
+    /* FPU/SSE state (fxsave image, 512 bytes, 16-byte aligned). User
+     * programs compiled with SSE use the XMM registers; the kernel
+     * itself is compiled with -mgeneral-regs-only and never touches
+     * them, but they must survive a task switch, so every switch
+     * fxsaves the outgoing task and fxrstors the incoming one. */
+    uint8_t fpu[512] __attribute__((aligned(16)));
+
+    /* User-mode FS base (thread pointer / TLS). Written by
+     * arch_prctl(ARCH_SET_FS); reloaded into the MSR on every task
+     * switch (the C library stores errno and TLS in it). */
+    uint64_t fs_base;
+
+    /* Next address for anonymous mmap allocations (see SYS_MMAP). */
+    uint64_t mmap_cur;
+
     int exit_status;
 };
 

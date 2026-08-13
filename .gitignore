@@ -6,3 +6,9 @@ iso_root/
 
 # Logs
 *.log
+# musl build outputs (source tree stays committed, artifacts don't)
+musl-out/
+musl-1.2.6/obj/
+musl-1.2.6/lib/
+musl-1.2.6/config.mak
+musl-1.2.6/include/bits/

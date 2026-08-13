@@ -278,6 +278,18 @@ void vmm_unmap_page(uint64_t virt) {
     invlpg(virt);
 }
 
+void vmm_unmap_page_in(uint64_t cr3, uint64_t virt) {
+    uint64_t *pte = walk_pt(cr3, virt, false, false, NULL);
+    if (pte == NULL) {
+        return;
+    }
+    *pte = 0;
+    /* The TLB entry for this page may still be cached from a previous
+     * visit to this space. A CR3 reload flushes it on the next switch
+     * into this space; invlpg covers the current space as well. */
+    invlpg(virt);
+}
+
 uint64_t vmm_translate_in(uint64_t cr3, uint64_t virt) {
     uint64_t *pte = walk_pt(cr3, virt, false, false, NULL);
     if (pte == NULL || !(*pte & VMM_PRESENT)) {

@@ -13,6 +13,7 @@
 
 #include <limine.h>
 
+#include "arch/x86_64/cpu.h"
 #include "arch/x86_64/gdt.h"
 #include "arch/x86_64/idt.h"
 #include "arch/x86_64/io.h"
@@ -160,6 +161,11 @@ void _start(void) {
     kbd_init();
     vfs_init();
     elf_install_test_program();
+
+    /* SSE for user programs: the C library uses SSE2 instructions
+     * (memcpy, string ops, math). The scheduler now saves/restores
+     * FPU state, so user SSE survives task switches. */
+    cpu_enable_sse();
 
     /* The scheduler: tsh becomes task 0; the PIT (IRQ0) drives
      * round-robin switching. */

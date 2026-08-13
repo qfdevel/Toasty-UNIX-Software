@@ -44,6 +44,17 @@
  * kernel heap is supervisor-only and ring 3 must not touch it). */
 #define USER_STACK_BASE 0x60000000ull
 
+/* First address handed out by SYS_MMAP (must match syscall.c). */
+#define MMAP_CURSOR_START 0x40000000ull
+
+/* IA32_FS_BASE model-specific register (see io.h wrmsr/rdmsr). */
+#define MSR_FS_BASE 0xC0000100
+
+/* AT_PAGESZ auxv entry: the C library (musl) reads the page size
+ * from the auxiliary vector at startup; without it the allocator
+ * breaks (page_size 0). */
+#define AT_PAGESZ 6
+
 static struct task g_tasks[TASK_MAX];
 static struct task *g_current;
 static uint32_t g_next_pid = 1;
@@ -104,11 +115,17 @@ void sched_init(void) {
     strcpy(g_current->name, "tsh");
     /* Task 0 is the kernel shell: it keeps the boot address space. */
     g_current->cr3 = vmm_root_cr3();
+    g_current->fs_base = 0;
+    g_current->mmap_cur = MMAP_CURSOR_START;
     /* Task 0 runs on the boot stack; give it a real kernel stack so
      * TSS.RSP0 is always valid. */
     g_current->kstack = (uint64_t)(uintptr_t)kmalloc(STACK_SIZE);
     g_current->kstack_top = g_current->kstack + STACK_SIZE;
     g_current->rsp = 0;
+    /* Capture the boot CPU's FPU state so switching back to task 0
+     * restores exactly what the shell left behind. */
+    __asm__ volatile("fxsave (%0)" : : "r"(g_current->fpu) : "memory");
+    wrmsr(MSR_FS_BASE, 0);
     tss_set_rsp0(g_current->kstack_top);
 }
 
@@ -125,7 +142,8 @@ int task_create_user(uint64_t entry, const char *name, uint64_t cr3) {
 
     /* Map a fresh user stack inside the task's private address space:
      * ring 3 needs USER pages there. The kernel heap (where this
-     * code runs) is supervisor-only. */
+     * code runs) is supervisor-only. Frames are zeroed via the HHDM
+     * mapping: the C library's startup code expects a clean stack. */
     uint64_t ustack = USER_STACK_BASE;
     uint64_t pages = STACK_SIZE / 4096;
     for (uint64_t i = 0; i < pages; i++) {
@@ -133,11 +151,37 @@ int task_create_user(uint64_t entry, const char *name, uint64_t cr3) {
         if (frame == 0) {
             return -1;
         }
+        memset((void *)pmm_phys_to_virt(frame), 0, 4096);
         if (vmm_map_page_in(cr3, ustack + i * 4096, frame,
                             VMM_PRESENT | VMM_WRITE | VMM_USER) != 0) {
             return -1;
         }
     }
+
+    /* Initial user stack image, laid out the way a C runtime expects
+     * it (crt1 reads argc at (%rsp), argv after it, then a NULL
+     * envp, then the auxiliary vector):
+     *   [0] argc = 0
+     *   [1] argv[0] = NULL
+     *   [2] envp[0] = NULL
+     *   [3] auxv[0] = AT_PAGESZ
+     *   [4] auxv[1] = 4096
+     *   [5] auxv[2] = 0 (terminator)
+     * RSP points at word [0]. The words sit in the last 48 bytes of
+     * the top stack page; write them through the HHDM mapping (the
+     * caller may not be in this space). */
+    uint64_t top_frame = vmm_translate_in(cr3, ustack + STACK_SIZE - 4096);
+    if (top_frame == 0) {
+        return -1;
+    }
+    uint64_t *init = (uint64_t *)(pmm_phys_to_virt(top_frame) + 4048);
+    init[0] = 0;        /* argc */
+    init[1] = 0;        /* argv[0] */
+    init[2] = 0;        /* envp[0] */
+    init[3] = AT_PAGESZ;
+    init[4] = 4096;     /* page size */
+    init[5] = 0;        /* auxv terminator */
+    uint64_t ustack_rsp = ustack + STACK_SIZE - 48;
 
     t->pid = g_next_pid++;
     t->state = TASK_READY;
@@ -149,6 +193,18 @@ int task_create_user(uint64_t entry, const char *name, uint64_t cr3) {
     t->ustack = ustack;
     t->ustack_top = ustack + STACK_SIZE;
     t->cr3 = cr3;
+    t->fs_base = 0;
+    t->mmap_cur = MMAP_CURSOR_START;
+
+    /* Default FPU state (hardware reset values): x87 control word
+     * with all exceptions masked, empty x87 tag word, MXCSR with all
+     * exceptions masked. fxrstor of a fully zeroed image would leave
+     * MXCSR unmasked (NaN operations would raise #XM). */
+    memset(t->fpu, 0, sizeof(t->fpu));
+    *(uint16_t *)(t->fpu + 0) = 0x037F;  /* x87 CW */
+    *(uint16_t *)(t->fpu + 4) = 0xFFFF;  /* x87 FTW (all empty) */
+    *(uint32_t *)(t->fpu + 24) = 0x1F80; /* MXCSR */
+    *(uint32_t *)(t->fpu + 28) = 0xFFFF; /* MXCSR_MASK */
 
     /* Build the fake interrupt frame at the top of the kernel stack.
      * Layout (lowest first, matching what the CPU pushes on a
@@ -159,7 +215,7 @@ int task_create_user(uint64_t entry, const char *name, uint64_t cr3) {
      * task starts at `entry` in ring 3. */
     uint64_t *f = (uint64_t *)(uintptr_t)t->kstack_top;
     f[-1]  = SEL_USER_DATA;   /* ss  */
-    f[-2]  = t->ustack_top;   /* rsp */
+    f[-2]  = ustack_rsp;      /* rsp: points at the init stack image */
     /* rflags: IF set + IOPL=3. IRETQ to a lower privilege level
      * requires IOPL >= new CPL (else #GP); user code here runs with
      * I/O privileges for now, tightened when the syscall gate is the
@@ -246,10 +302,16 @@ uint64_t sched_tick(uint64_t frame_rsp) {
     g_current->state = TASK_READY;
     next->state = TASK_RUNNING;
     tss_set_rsp0(next->kstack_top);
+    /* Save the outgoing task's FPU state before it is switched away;
+     * restore the incoming task's state after the address-space
+     * switch. Same for the FS base (thread pointer / TLS). */
+    __asm__ volatile("fxsave (%0)" : : "r"(g_current->fpu) : "memory");
     /* Load the next task's address space. This is safe here: the
      * kernel stack and all kernel data are mapped in every space via
      * the shared kernel half. The CR3 reload also flushes the TLB. */
     vmm_space_switch(next->cr3);
+    __asm__ volatile("fxrstor (%0)" : : "r"(next->fpu) : "memory");
+    wrmsr(MSR_FS_BASE, next->fs_base);
     g_current = next;
     return next->rsp;
 }
@@ -278,8 +340,12 @@ void task_exit(int status) {
     next->state = TASK_RUNNING;
     tss_set_rsp0(next->kstack_top);
     /* Same address-space switch as in sched_tick: the iretq below
-     * resumes the next task inside its own space. */
+     * resumes the next task inside its own space. FPU state and the
+     * FS base travel with the task as well. */
+    __asm__ volatile("fxsave (%0)" : : "r"(g_current->fpu) : "memory");
     vmm_space_switch(next->cr3);
+    __asm__ volatile("fxrstor (%0)" : : "r"(next->fpu) : "memory");
+    wrmsr(MSR_FS_BASE, next->fs_base);
     g_current = next;
 
     /* Switch to the next task's frame without returning. */

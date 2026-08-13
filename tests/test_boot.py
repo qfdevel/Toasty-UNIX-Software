@@ -305,6 +305,21 @@ def main():
         offset = wait_for("-14", offset=offset)
         ok("ring-3 syscall rejects kernel pointers with -EFAULT")
 
+        # 12e. The ported musl C library: a real libc program linked
+        #      against musl-1.2.6. printf goes through writev, malloc
+        #      through mmap, strlen through SSE2 asm (FPU context
+        #      switching), getpid through the ABI, TLS/errno through
+        #      arch_prctl(ARCH_SET_FS), fopen through openat.
+        type_text(sock, "exec /boot/musl_hello.elf\r")
+        offset = wait_for("started as pid", offset=offset)
+        offset = wait_for("musl 1.2.6 on TUS: hello from libc", offset=offset)
+        offset = wait_for("argc=0", offset=offset)
+        offset = wait_for("pid=", offset=offset)
+        offset = wait_for("malloc: heap string", offset=offset)
+        offset = wait_for("free ok", offset=offset)
+        offset = wait_for("all good", offset=offset)
+        ok("musl libc program runs: printf, malloc, SSE strlen, fopen, getpid")
+
         # 13. scrollback: overflow the screen, PageUp shows older
         #     lines, PageDown returns to the exact live view.
         #     (Runs BEFORE fbfill: that test paints the screen and

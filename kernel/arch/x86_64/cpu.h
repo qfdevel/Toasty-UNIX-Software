@@ -14,4 +14,9 @@ void cpu_get_vendor(char out[13]);
 /* Write the 48-character model string (e.g. "AMD Ryzen 7 ...") plus NUL. */
 void cpu_get_brand(char out[49]);
 
+/* Enable SSE/SSE2 for user mode (CR0.EM clear, CR4.OSFXSR set). The
+ * kernel itself never touches the FPU/SSE state; the scheduler saves
+ * and restores it per task. Call before the first user task runs. */
+void cpu_enable_sse(void);
+
 #endif /* TUS_ARCH_CPU_H */

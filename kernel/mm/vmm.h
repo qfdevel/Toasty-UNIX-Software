@@ -65,6 +65,10 @@ int vmm_map_region(uint64_t virt, uint64_t phys, size_t bytes, uint64_t flags);
 /* Unmap a single page (PTE cleared, TLB flushed). */
 void vmm_unmap_page(uint64_t virt);
 
+/* Unmap a single page in an explicit address space (PTE cleared,
+ * TLB flushed). The target space does not need to be loaded. */
+void vmm_unmap_page_in(uint64_t cr3, uint64_t virt);
+
 /* Translate a virtual address in the current space; 0 if unmapped. */
 uint64_t vmm_translate(uint64_t virt);
 

@@ -201,8 +201,88 @@ tus> fbfill 336699
 fb0: filled with #336699
 ```
 
-## 4a. Kernel state (v0.1.0 — archived 2026-08-12)
+## 4b. Kernel state (v0.5.0 — musl userspace libc, 2026-08-13)
 
+v0.5.0 ports **musl 1.2.6** as the userspace C library. Userspace
+programs can now be written in real C (printf, malloc, fopen, …) and
+linked statically against `libc.a`; the first such program
+(`tests/musl_hello.elf`) runs as a ring-3 task and is verified by
+`make test` (25/25).
+
+### 4b.1 Kernel side
+
+- **New syscalls** (ABI extended, old numbers untouched):
+  `SYS_MMAP 12` (anonymous only, zeroed pages, per-task cursor
+  starting at 0x40000000), `SYS_MUNMAP 13` (unmaps + returns frames
+  to the PMM), `SYS_ARCH_PRCTL 14` (ARCH_SET_FS/ARCH_GET_FS — the
+  thread pointer / TLS base), `SYS_WRITEV 15` (scatter write;
+  musl's stdio writes through writev, not write).
+- **SSE/FPU for user mode**: `cpu_enable_sse()` clears CR0.EM and
+  sets CR4.OSFXSR|OSXMMEXCPT (user SSE would #UD otherwise). The
+  kernel stays `-mgeneral-regs-only`; instead every task now carries
+  a 512-byte fxsave image (`struct task.fpu`) and the scheduler
+  fxsaves the outgoing / fxrstors the incoming task on every switch
+  (both in `sched_tick` and `task_exit`). Fresh tasks get a default
+  FPU state (x87 CW=0x037F, FTW=0xFFFF, MXCSR=0x1F80 — a zeroed
+  MXCSR would unmask exceptions).
+- **Per-task FS base**: `arch_prctl(ARCH_SET_FS)` writes
+  IA32_FS_BASE immediately and stores the value in `task.fs_base`;
+  the scheduler reloads the MSR on every task switch, so the C
+  library's TLS (errno, stdio locks) survives preemption.
+- **Initial user stack**: `task_create_user` now lays out a real
+  process image on the (zeroed) user stack:
+  `[argc=0][argv[0]=NULL][envp[0]=NULL][auxv: AT_PAGESZ, 4096, 0]`.
+  musl's crt1 reads argc at (%rsp) and the C library reads the page
+  size from the auxv — without AT_PAGESZ the allocator breaks
+  (page_size 0).
+- **ELF loader**: `tus_alloc` maps fresh frames; elfload itself
+  zeroes BSS (`memset(dest+filesz, 0, memsz-filesz)`), so musl's
+  global state (stdin/stdout FILEs) starts clean.
+
+### 4b.2 musl side (musl-1.2.6/ is part of the repo)
+
+- **`arch/x86_64/syscall_arch.h`**: `__syscall0..6` now forward to
+  `tus_syscall()` instead of the Linux `syscall` instruction.
+- **`src/internal/tus_syscall.c`** (new): the ABI bridge. Translates
+  the Linux x86_64 syscall numbers used by the musl source to TUS
+  numbers, drops the dirfd of openat/mkdirat/unlinkat, emulates
+  nanosleep/clock_nanosleep in userspace (timespec → whole seconds →
+  TUS sleep), ignores madvise/poll/umask, and returns -ENOSYS for
+  everything else (exactly like an unknown Linux syscall).
+- **`src/thread/x86_64/__set_thread_area.s`**: upstream uses the raw
+  `syscall` instruction with Linux number 158 — rewritten as
+  `int $0x80` with TUS number 14 (same ARCH_SET_FS op).
+- **`src/thread/x86_64/syscall_cp.s`**: forwards to `tus_syscall`
+  (TUS has no thread cancellation yet; the cancel-flag check stays).
+- **Build**: `make musl` (or the first kernel build) runs
+  `./configure --target=x86_64-unknown-tus --disable-shared` +
+  `make` + `make install DESTDIR=musl-out`. Two quirks: `CC=gcc`
+  must be passed to configure (it cross-detects from the target
+  tuple), and `AR=ar RANLIB=ranlib` to make (it wants
+  `x86_64-unknown-tus-ar`). The build artifacts (obj/, lib/,
+  config.mak, musl-out/) are gitignored; the patched source is
+  committed.
+- **Link recipe** (see Makefile): compile with `-nostdinc
+  -Imusl-out/usr/include`, link statically at 0x10000000 with
+  `crt1.o crti.o <program> -lc crtn.o`. Entry is crt1's `_start`.
+
+Verified session (serial log):
+
+```
+> exec /boot/musl_hello.elf
+musl 1.2.6 on TUS: hello from libc
+argc=0 argv0=(null)
+pid=2
+malloc: heap string (128 bytes, strlen=11)
+free ok
+all good
+```
+
+Not yet implemented (return -ENOSYS): fork/exec (process model is
+scheduler-based), signals, sockets, readdir/getdents, stat, file
+seeking, time-of-day clocks, threads (clone).
+
+## 4a. Kernel state (v0.1.0 — archived 2026-08-12)
 Boots from the ISO in QEMU (BIOS), serial + framebuffer console,
 interrupt-driven PS/2 keyboard, and an interactive `tsh`. Verified by
 `make test` (10/10 automated checks).
@@ -286,6 +366,33 @@ interrupt-driven PS/2 keyboard, and an interactive `tsh`. Verified by
     the CPU-pushed RIP slot, and writing there makes iretq jump to
     the CS value (0x8) → #PF at address 8. Pass it as a separate
     argument instead.
+18. **musl needs the AT_PAGESZ auxv entry**: `libc.page_size` is read
+    from the auxiliary vector at startup; with no auxv (or no
+    PAGESZ) the allocator sees page_size 0 and breaks. The task
+    creation code lays out argc/argv/envp/auxv on the user stack.
+19. **musl's TLS init uses the raw `syscall` instruction** in
+    `__set_thread_area.s` (it does NOT go through `__syscall()`),
+    so the arch asm files must be patched too, not just the C
+    wrappers. Same for `syscall_cp.s`.
+20. **SSE must be enabled before user programs run** (CR4.OSFXSR),
+    and the scheduler must save/restore FPU state per task — musl's
+    x86_64 string/math asm is SSE2. Without fxsave/fxrstor on task
+    switch, one task's XMM registers leak into the next and
+    strlen/memcpy silently corrupt memory.
+21. **musl stdio writes via writev, not write** (`__stdio_write`);
+    fopen uses openat(257)/mkdirat(258)/unlinkat(263) with
+    AT_FDCWD, not open/mkdir/unlink. The remap layer must cover the
+    *at variants (dropping dirfd) or every fopen/printf fails.
+22. **musl configure/make quirks**: configure cross-detects a
+    compiler from `--target` (pass `CC=gcc`) and make wants
+    target-prefixed tools (pass `AR=ar RANLIB=ranlib`).
+23. **A user task's initial FPU state must be a valid default**
+    (MXCSR=0x1F80): fxrstor of a fully zeroed image unmask s all
+    SSE exceptions — any NaN in user code then raises #XM.
+24. **The initial user stack must be zeroed**: pmm frames are not
+    zeroed on allocation. musl's crt1 walks argc/argv and the C
+    library scans envp/auxv; garbage there means garbage argc or a
+    wild auxv walk (crash before main).
 
 ## 6. Toolchain Status (verified 2026-08-12)
 
@@ -384,6 +491,7 @@ Design principles:
 | 13 | Scheduler: round-robin preemptive multitasking | ✅ done (v0.3.0) |
 | 14 | Ring 3: user-mode ELF tasks (exec, ps) | ✅ done (v0.3.0) |
 | 16 | Per-task address spaces + syscall ring-3 enforcement | ✅ done (v0.4.0) |
+| 17 | **musl 1.2.6 userspace libc** (printf/malloc/stdio/TLS via int $0x80 bridge) | ✅ done (v0.5.0) |
 | 15 | Userspace: init, userspace tsh | ⏳ |
 | 15 | Physical disk driver + real filesystem | ⏳ |
 | ... | (expand as we go) | |

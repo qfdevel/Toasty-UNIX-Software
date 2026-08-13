@@ -44,3 +44,19 @@ void cpu_get_brand(char out[49]) {
     }
     out[48] = '\0';
 }
+
+/* Enable SSE/SSE2 for user-mode programs. The kernel itself is
+ * compiled with -mgeneral-regs-only and never touches the XMM
+ * registers, but the C library (musl) is built with SSE2 and would
+ * fault with #UD as long as CR4.OSFXSR is clear and CR0.EM is set.
+ * The scheduler saves/restores the FPU state (fxsave/fxrstor) on
+ * every task switch, so user SSE state survives preemption. */
+void cpu_enable_sse(void) {
+    uint64_t cr0, cr4;
+    __asm__ volatile("mov %%cr0, %0" : "=r"(cr0));
+    cr0 &= ~(1ull << 2);   /* CR0.EM: x87 is present, not emulated */
+    __asm__ volatile("mov %0, %%cr0" : : "r"(cr0) : "memory");
+    __asm__ volatile("mov %%cr4, %0" : "=r"(cr4));
+    cr4 |= (1ull << 9) | (1ull << 10); /* OSFXSR | OSXMMEXCPT */
+    __asm__ volatile("mov %0, %%cr4" : : "r"(cr4) : "memory");
+}
