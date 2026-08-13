@@ -9,7 +9,9 @@
  * kernel: open() returns an fd, read/write/ioctl operate on it.
  * fds 0, 1 and 2 are pre-opened on /dev/tty0 (stdin/stdout/stderr).
  *
- * NOTE: paths are absolute ("/dev/fb0"); ".." is not supported yet.
+ * NOTE: paths are absolute ("/dev/fb0"); the shell (cmd_fs.c)
+ * resolves relative paths against its working directory before
+ * calling into the VFS.
  */
 
 #ifndef TUS_VFS_VFS_H

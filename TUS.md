@@ -119,6 +119,13 @@ only pass pointers into the user half. Verified by `make test`
   (-14). The kernel shell (ring 0) is exempt. Proven by the embedded
   `enforce.elf` test image, which passes a kernel address to write()
   and prints the -14 it gets back.
+- **cd / pwd** (`kernel/shell/cmd_fs.c`): tsh has a real working
+  directory. `cd` validates the target with open + readdir (only
+  real directories are entered), `cd` alone returns to `/`;
+  relative paths in ls/cat/echo>/mkdir/touch/rm/exec resolve against
+  the cwd with `.` and `..` support, and the prompt shows it
+  (`tus:/tmp> `). The VFS stays absolute-only; the shell does the
+  resolution before calling the syscall ABI.
 
 ### 4.1 Earlier phases (v0.2.0 / v0.3.0, archived)
 

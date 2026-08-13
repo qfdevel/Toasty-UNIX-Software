@@ -21,16 +21,146 @@
 
 /* ---- helpers ---- */
 
+/* Current working directory of the shell. The VFS itself only knows
+ * absolute paths; the shell resolves every relative path against
+ * this before calling the syscall ABI (a real UNIX shell would hand
+ * the kernel a relative path and let it resolve - our VFS is still
+ * absolute-only, so the shell does the resolution). */
+static char g_cwd[128] = "/";
+
+/* Longest normalized path we hand to the syscall ABI. */
+#define PATH_BUF 256
+
+const char *shell_cwd(void) {
+    return g_cwd;
+}
+
+/* Resolve `in` (absolute or relative) against g_cwd into `out`:
+ * collapses duplicate slashes, honors "." and ".." (".." at the
+ * root stays at the root). `out` always receives a normalized
+ * absolute path. */
+static void path_resolve(const char *in, char *out, size_t outsz) {
+    char tmp[PATH_BUF + 32];
+
+    if (in[0] == '/') {
+        strncpy(tmp, in, sizeof(tmp) - 1);
+        tmp[sizeof(tmp) - 1] = '\0';
+    } else {
+        size_t cl = strlen(g_cwd);
+        size_t il = strlen(in);
+        if (cl + 1 + il >= sizeof(tmp)) {
+            strncpy(out, "/", outsz); /* absurdly long: fall back to root */
+            return;
+        }
+        memcpy(tmp, g_cwd, cl);
+        tmp[cl] = '/';
+        memcpy(tmp + cl + 1, in, il + 1);
+    }
+
+    /* Split on '/', honoring "." and "..". */
+    const char *segs[32];
+    size_t lens[32];
+    int n = 0;
+
+    const char *p = tmp;
+    while (*p != '\0') {
+        while (*p == '/') {
+            p++;
+        }
+        if (*p == '\0') {
+            break;
+        }
+        const char *s = p;
+        while (*p != '\0' && *p != '/') {
+            p++;
+        }
+        size_t len = (size_t)(p - s);
+
+        if (len == 1 && s[0] == '.') {
+            continue;
+        }
+        if (len == 2 && s[0] == '.' && s[1] == '.') {
+            if (n > 0) {
+                n--; /* walk up one level */
+            }
+            continue;
+        }
+        if (n < 32) {
+            segs[n] = s;
+            lens[n] = len;
+            n++;
+        }
+    }
+
+    /* Rebuild the normalized absolute path. */
+    char *w = out;
+    size_t left = outsz;
+    *w++ = '/';
+    left--;
+    for (int i = 0; i < n && left > 1; i++) {
+        if (i > 0) {
+            *w++ = '/';
+            left--;
+        }
+        size_t l = lens[i] < left - 1 ? lens[i] : left - 1;
+        memcpy(w, segs[i], l);
+        w += l;
+        left -= l;
+    }
+    *w = '\0';
+}
+
 static void print_syscall_error(const char *what, long err) {
     kprintf("%s: error %ld\n", what, -err);
+}
+
+/* ---- pwd / cd ---- */
+
+static int cmd_pwd(int argc, char **argv) {
+    (void)argc;
+    (void)argv;
+    kprintf("%s\n", g_cwd);
+    return 0;
+}
+
+static int cmd_cd(int argc, char **argv) {
+    const char *target = (argc > 1) ? argv[1] : "/";
+
+    char resolved[PATH_BUF];
+    path_resolve(target, resolved, sizeof(resolved));
+
+    /* Only enter real directories: open + readdir succeeds for dirs,
+     * returns -ENOTDIR for files. */
+    long fd = syscall(SYS_OPEN, (long)resolved, O_RDONLY, 0, 0, 0);
+    if (fd < 0) {
+        print_syscall_error("cd", fd);
+        return 1;
+    }
+    struct vfs_dirent ent;
+    long r = syscall(SYS_READDIR, fd, (long)&ent, sizeof(ent), 0, 0);
+    syscall(SYS_CLOSE, fd, 0, 0, 0, 0);
+    if (r < 0) {
+        kprintf("cd: not a directory: %s\n", resolved);
+        return 1;
+    }
+
+    strncpy(g_cwd, resolved, sizeof(g_cwd) - 1);
+    g_cwd[sizeof(g_cwd) - 1] = '\0';
+    return 0;
 }
 
 /* ---- ls ---- */
 
 static int cmd_ls(int argc, char **argv) {
-    const char *path = (argc > 1) ? argv[1] : "/";
+    char resolved[PATH_BUF];
+    if (argc > 1) {
+        path_resolve(argv[1], resolved, sizeof(resolved));
+    } else {
+        strncpy(resolved, g_cwd, sizeof(resolved) - 1);
+        resolved[sizeof(resolved) - 1] = '\0';
+    }
 
-    long fd = syscall(SYS_OPEN, (long)path, O_RDONLY, 0, 0, 0);
+    long fd = syscall(SYS_OPEN, (long)resolved, O_RDONLY, 0, 0, 0);
     if (fd < 0) {
         print_syscall_error("ls", fd);
         return 1;
@@ -59,12 +189,14 @@ static int cmd_cat(int argc, char **argv) {
         return 1;
     }
 
-    long fd = syscall(SYS_OPEN, (long)argv[1], O_RDONLY, 0, 0, 0);
+    char resolved[PATH_BUF];
+    path_resolve(argv[1], resolved, sizeof(resolved));
+
+    long fd = syscall(SYS_OPEN, (long)resolved, O_RDONLY, 0, 0, 0);
     if (fd < 0) {
         print_syscall_error("cat", fd);
         return 1;
     }
-
     char buf[256];
     long n;
     while ((n = syscall(SYS_READ, fd, (long)buf, sizeof(buf), 0, 0)) > 0) {
@@ -83,10 +215,12 @@ static int cmd_echo(int argc, char **argv) {
     /* Detect a ">" redirection: echo a b > path */
     long fd = 1; /* stdout by default */
     int end_arg = argc;
+    char resolved[PATH_BUF];
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], ">") == 0 && i + 1 < argc) {
-            fd = syscall(SYS_OPEN, (long)argv[i + 1],
+            path_resolve(argv[i + 1], resolved, sizeof(resolved));
+            fd = syscall(SYS_OPEN, (long)resolved,
                          O_WRONLY | O_CREAT | O_TRUNC, 0, 0, 0);
             if (fd < 0) {
                 print_syscall_error("echo", fd);
@@ -118,7 +252,9 @@ static int cmd_mkdir(int argc, char **argv) {
         console_write("usage: mkdir <path>\n");
         return 1;
     }
-    long r = syscall(SYS_MKDIR, (long)argv[1], 0, 0, 0, 0);
+    char resolved[PATH_BUF];
+    path_resolve(argv[1], resolved, sizeof(resolved));
+    long r = syscall(SYS_MKDIR, (long)resolved, 0, 0, 0, 0);
     if (r < 0) {
         print_syscall_error("mkdir", r);
         return 1;
@@ -131,7 +267,9 @@ static int cmd_touch(int argc, char **argv) {
         console_write("usage: touch <path>\n");
         return 1;
     }
-    long fd = syscall(SYS_OPEN, (long)argv[1], O_CREAT | O_RDWR, 0, 0, 0);
+    char resolved[PATH_BUF];
+    path_resolve(argv[1], resolved, sizeof(resolved));
+    long fd = syscall(SYS_OPEN, (long)resolved, O_CREAT | O_RDWR, 0, 0, 0);
     if (fd < 0) {
         print_syscall_error("touch", fd);
         return 1;
@@ -145,7 +283,9 @@ static int cmd_rm(int argc, char **argv) {
         console_write("usage: rm <path>\n");
         return 1;
     }
-    long r = syscall(SYS_UNLINK, (long)argv[1], 0, 0, 0, 0);
+    char resolved[PATH_BUF];
+    path_resolve(argv[1], resolved, sizeof(resolved));
+    long r = syscall(SYS_UNLINK, (long)resolved, 0, 0, 0, 0);
     if (r < 0) {
         print_syscall_error("rm", r);
         return 1;
@@ -202,7 +342,9 @@ static int cmd_exec(int argc, char **argv) {
         console_write("usage: exec <static-elf-path>\n");
         return 1;
     }
-    elf_exec(argv[1]);
+    char resolved[PATH_BUF];
+    path_resolve(argv[1], resolved, sizeof(resolved));
+    elf_exec(resolved);
     return 0;
 }
 
@@ -224,6 +366,8 @@ const struct shell_command g_fs_commands[] = {
     { "mkdir",   "create a directory",          cmd_mkdir },
     { "touch",   "create an empty file",        cmd_touch },
     { "rm",      "remove a file",               cmd_rm },
+    { "cd",      "change the working directory", cmd_cd },
+    { "pwd",     "print the working directory", cmd_pwd },
     { "uptime",  "time since boot",             cmd_uptime },
     { "sleep",   "wait N milliseconds",         cmd_sleep },
     { "fbfill",  "fill the framebuffer with a color", cmd_fbfill },

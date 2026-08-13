@@ -250,6 +250,30 @@ def main():
         offset = wait_for("sub", offset=offset)
         ok("mkdir creates a directory")
 
+        # 11b. cd/pwd: a real working directory. Relative paths are
+        #      resolved against it, .. walks up, and the prompt shows
+        #      the current directory (tus:/tmp> ).
+        type_text(sock, "pwd\r")
+        offset = wait_for("/\n", offset=offset)
+        type_text(sock, "cd /tmp\r")
+        type_text(sock, "pwd\r")
+        offset = wait_for("/tmp\n", offset=offset)
+        ok("cd changes the working directory, pwd reports it")
+        type_text(sock, "touch rel.txt\r")
+        type_text(sock, "ls\r")
+        offset = wait_for("rel.txt", offset=offset)
+        ok("relative paths resolve against the working directory")
+        type_text(sock, "cd sub\r")
+        type_text(sock, "pwd\r")
+        offset = wait_for("/tmp/sub\n", offset=offset)
+        type_text(sock, "cd ..\r")
+        type_text(sock, "pwd\r")
+        offset = wait_for("/tmp\n", offset=offset)
+        type_text(sock, "cd /\r")
+        type_text(sock, "pwd\r")
+        offset = wait_for("/\n", offset=offset)
+        ok("cd .. walks up, cd / returns to the root")
+
         # 12. ELF loader: run the embedded static binary as a ring-3 task
         type_text(sock, "ls /boot\r")
         offset = wait_for("hello.elf", offset=offset)

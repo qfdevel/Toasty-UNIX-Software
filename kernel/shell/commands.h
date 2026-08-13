@@ -22,6 +22,10 @@ struct shell_command {
 extern const struct shell_command g_fs_commands[];
 extern const size_t g_fs_command_count;
 
+/* Current working directory of the shell (absolute, normalized).
+ * Defined in cmd_fs.c; used by the prompt and by path resolution. */
+const char *shell_cwd(void);
+
 /* Tokenize a NUL-terminated line and run the matching command. */
 void command_execute(const char *line);
 

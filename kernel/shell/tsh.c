@@ -19,10 +19,14 @@
 static char g_line[TSH_LINE_MAX];
 static int g_line_len;
 
-/* Print the prompt in the accent color, then switch back. */
+/* Print the prompt in the accent color, then switch back. The
+ * prompt shows the shell's working directory, like a real UNIX
+ * shell: tus:/tmp>  (the directory part comes from cmd_fs.c). */
 static void tsh_prompt(void) {
     console_set_color(COLOR_ACCENT, COLOR_BG);
-    console_write("tus> ");
+    console_write("tus:");
+    console_write(shell_cwd());
+    console_write("> ");
     console_set_color(COLOR_FG, COLOR_BG);
 }
 
