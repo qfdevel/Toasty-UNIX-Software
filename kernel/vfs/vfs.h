@@ -31,6 +31,7 @@
 #define O_RDWR   2
 #define O_CREAT  0x40
 #define O_TRUNC  0x200
+#define O_APPEND 0x400
 
 #define VFS_NAME_MAX 64
 #define VFS_MAX_FDS  16
@@ -42,6 +43,12 @@ struct vfs_dirent {
     uint32_t size;
     uint32_t mode; /* permission bits (for ls -l) */
 };
+
+/* An open file description (opaque; see vfs.c). Each fd table slot
+ * points at one; dup/dup2 share the same one (and therefore the same
+ * file position, like POSIX). Pipes are represented by a vfs_file
+ * whose `pipe` field is set instead of `node`. */
+struct vfs_file;
 
 /* Device driver interface. `pos` is the fd's current position. */
 struct file_ops {
@@ -97,6 +104,24 @@ int vfs_remove(const char *path);
 
 /* ---- fd-based API (what the syscalls call) ---- */
 
+/* Create a pipe: fds[0] is the read end, fds[1] the write end. Reads
+ * block (hlt) until data arrives or the last write end is closed
+ * (EOF); writes block while the 4 KiB buffer is full and return
+ * -EPIPE once no read end is open. The fds live in the calling
+ * task's table and are inherited by its children. */
+long vfs_pipe(int fds[2]);
+
+/* POSIX dup: duplicate `oldfd` onto the lowest free slot. */
+long vfs_dup(long oldfd);
+
+/* POSIX dup2: make `newfd` a copy of `oldfd`, closing any file
+ * currently on `newfd`. Returns newfd (>= 0) or a negative errno. */
+long vfs_dup2(long oldfd, long newfd);
+
+/* Copy a whole fd table into another (called at task creation so a
+ * child inherits its parent's open files, refcounted). */
+void vfs_fd_inherit(struct vfs_file **dst, struct vfs_file **src);
+
 long vfs_open(const char *path, int flags);
 long vfs_close(long fd);
 long vfs_read(long fd, void *buf, size_t count);
@@ -107,8 +132,8 @@ long vfs_readdir(long fd, void *buf, size_t count);
 long vfs_mkdir(const char *path, uint32_t mode);
 long vfs_unlink(const char *path);
 
-/* Close every fd opened by `pid` (called from task_exit). */
-void vfs_close_all(uint32_t pid);
+/* Close every fd in the CURRENT task's table (called from task_exit). */
+void vfs_close_all(void);
 
 /* Read from a file at an explicit offset, without moving the fd's
  * position (used by the ELF loader). Returns bytes read or -errno. */

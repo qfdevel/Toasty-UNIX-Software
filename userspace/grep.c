@@ -55,25 +55,47 @@ static int mchar(int icase, char c) {
 }
 
 /* Pattern length of the atom at `re`; 0 if re does not start an atom. */
+static const char *re_group_end(const char *re, int ere);
+
+/* Pattern length of the atom at `re`; 0 if re does not start an atom. */
 static size_t re_atom_len(const char *re, int ere) {
     char c = *re;
     if (c == '\0' || c == ')' || c == '|') {
         return 0;
     }
     if (!ere && c == '\\') {
-        if (re[1] == '(' || re[1] == ')' || re[1] == '|' ||
-            re[1] == '{' || re[1] == '}') {
+        if (re[1] == '(') {
+            /* BRE group: the atom is the whole \(...\) */
+            const char *gend = re_group_end(re, ere);
+            /* gend points AT the closing ')': include it. */
+            return gend != NULL ? (size_t)(gend - re + 1) : 0;
+        }
+        if (re[1] == ')' || re[1] == '|' || re[1] == '{' ||
+            re[1] == '}') {
             return 0;
         }
         return 2;
     }
     if (ere && c == '(') {
-        return 0;
+        /* ERE group: the atom is the whole (...), so the quantifier
+         * check below sees the '{' that follows the group. */
+        const char *gend = re_group_end(re, ere);
+        return gend != NULL ? (size_t)(gend - re + 1) : 0;
     }
     if (c == '[') {
         const char *p = re + 1;
         int first = 1;
         while (*p != '\0' && (*p != ']' || first)) {
+            /* A POSIX class name [:name:] is atomic: its ']' must not
+             * terminate the outer class. */
+            if (*p == '[' && p[1] == ':') {
+                const char *close = strchr(p + 2, ':');
+                if (close != NULL && close[1] == ']') {
+                    p = close + 2;
+                    first = 0;
+                    continue;
+                }
+            }
             if (*p == '\\' && p[1] != '\0') {
                 p++;
             }
@@ -111,6 +133,14 @@ static int re_atom_char(const char *re, char c, int ere, int icase) {
         const char *end = p;
         int first = 1;
         while (*end != '\0' && (*end != ']' || first)) {
+            if (*end == '[' && end[1] == ':') {
+                const char *close = strchr(end + 2, ':');
+                if (close != NULL && close[1] == ']') {
+                    end = close + 2;
+                    first = 0;
+                    continue;
+                }
+            }
             if (*end == '\\' && end[1] != '\0') {
                 end++;
             }
@@ -124,11 +154,12 @@ static int re_atom_char(const char *re, char c, int ere, int icase) {
         const char *q = p;
         while (q < end) {
             if (*q == '[' && q + 1 < end && q[1] == ':') {
+                /* POSIX class: [[:name:]] - name runs up to the first
+                 * ':' and must be closed by a ']'. */
                 const char *name = q + 2;
                 const char *nn = strchr(name, ':');
-                size_t nlen = (nn != NULL && nn > name && nn[-1] == ':')
-                    ? (size_t)(nn - 1 - name) : 0;
-                if (nlen > 0) {
+                size_t nlen = (nn != NULL) ? (size_t)(nn - name) : 0;
+                if (nlen > 0 && nn[1] == ']') {
                     int in = 0;
                     unsigned char uc = (unsigned char)c;
                     if (nlen == 5 && strncmp(name, "alpha", 5) == 0) in = isalpha(uc);
@@ -170,7 +201,7 @@ static int re_atom_char(const char *re, char c, int ere, int icase) {
  * Returns a pointer to the ')' or NULL if unbalanced. */
 static const char *re_group_end(const char *re, int ere) {
     const char *p = re;
-    int depth = 1;
+    int depth = 0;
     while (*p != '\0') {
         if (!ere && *p == '\\' && (p[1] == '(' || p[1] == ')')) {
             if (p[1] == '(') {
@@ -213,7 +244,11 @@ struct qctx {
 static int q_cont(void *ctx, const char *s) {
     struct qctx *q = (struct qctx *)ctx;
     if (q->count <= 1) {
-        if (q->final_cb(q->final_ctx, s)) {
+        /* final_cb returns 0 when the tail matched (stop enumerating)
+         * and 1 when it did not (keep trying other lengths). The
+         * condition used to be inverted: a FAILING tail continuation
+         * was recorded as a success, so "line2" matched "line1". */
+        if (!q->final_cb(q->final_ctx, s)) {
             q->ok = 1;
             return 0; /* stop enumeration */
         }
@@ -246,7 +281,10 @@ static int atom_each(const char *re, const char *s, int ere, int icase,
             return 0;
         }
         const char *gstart = re + (c == '(' ? 1 : 2);
-        const char *gparen = gend - ((!ere && *(gend - 1) == ')') ? 1 : 0);
+        /* gend points at the ')' (ERE) or at the ')' of "\)" (BRE,
+         * one char past the backslash): back up over that backslash
+         * so the group text is exactly what sits between the parens. */
+        const char *gparen = gend - (!ere ? 1 : 0);
         size_t glen = (size_t)(gparen - gstart);
         char gbuf[PAT_MAX];
         if (glen >= sizeof(gbuf)) {

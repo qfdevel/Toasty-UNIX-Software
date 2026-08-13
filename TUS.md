@@ -511,6 +511,47 @@ into a local before the loop.
   (useradd as root via execve), passwd (crypt + status P), login
   (authentication + motd), cd - / mkdir -p. All v0.7.0 checks intact.
 
+## 4f. Kernel state (v2.0 — pipes & I/O redirection, 2026-08-13)
+
+tsh v2.0: `|`, `>`, `>>`, `<`, `2>`, `2>>`. The big enabler is a
+PER-TASK fd table (before, the 16 slots were global and shared by
+all tasks — two stages of a pipeline could never have different fd
+1). `struct task::fds[VFS_MAX_FDS]` holds `struct vfs_file *`
+(refcounted open file descriptions, shared pos on dup like POSIX);
+task_create_user() copies the creator's table (inheritance without
+fork) and task_exit() closes it. That makes redirection trivial:
+
+1. tsh rewires ITS OWN slots 0/1/2 with vfs_dup2 (pipe ends, files),
+2. spawns the stage — the child inherits the setup,
+3. restores its own slots from saved copies of the tty fds,
+4. waits for all pids (sched_task_alive + hlt, the tick preempts).
+
+Pipes (vfs_pipe, SYS_PIPE 25 / SYS_DUP2 26 / SYS_DUP 27): 4 KiB
+ring buffer, blocking via hlt() spin (preemption stays enabled
+inside syscalls, so a blocked reader is switched away by the 100 Hz
+tick and the writer gets CPU). EOF = buffer empty AND no write end
+open (refcounted refs_r/refs_w); write with no readers → -EPIPE.
+Builtin segments run inline with the same slot setup (echo writes
+through fd 1, so `echo hi | grep hi` works); builtins that print via
+the console directly (ls, help) cannot be piped yet.
+
+**grep.c regex engine fixed** (pre-existing bugs the pipes exposed):
+- q_cont had an INVERTED continuation test — a FAILING tail match
+  was recorded as success, so `grep -c line2` counted "line1"
+  (false positive). This bug masked the two below.
+- groups were dead code: re_atom_len returned 0 for `(` (both ERE
+  and BRE) and re_group_end's depth started at 1 (never 0) — group
+  + quantifier `(o){1,2}` never matched for real.
+- POSIX classes `[[:digit:]]` broken: the name scan stopped at the
+  inner `]` and mis-parsed the name.
+Now: groups, {n,m}, alternation, classes, anchors all verified.
+
+### 4f.1 Verified flow (make test, 43/43)
+
+- New: echo | grep, echo | sed | grep (two-stage), > trunc + >>
+  append (verified via grep -c), < into a pipeline, 2> to a file.
+  All 39 pre-existing checks intact.
+
 ## 4a. Kernel state (v0.1.0 — archived 2026-08-12)
 Boots from the ISO in QEMU (BIOS), serial + framebuffer console,
 interrupt-driven PS/2 keyboard, and an interactive `tsh`. Verified by
@@ -763,6 +804,7 @@ Design principles:
 | 16 | Per-task address spaces + syscall ring-3 enforcement | ✅ done (v0.4.0) |
 | 17 | **musl 1.2.6 userspace libc** (printf/malloc/stdio/TLS via int $0x80 bridge) | ✅ done (v0.5.0) |
 | 15 | Userspace: init, userspace tsh | ⏳ |
+| 19 | **tsh v2.0: pipes + I/O redirection** (`| > >> < 2> 2>>`) | ✅ done (v2.0) |
 | 15 | Physical disk driver + real filesystem | ⏳ |
 | ... | (expand as we go) | |
 

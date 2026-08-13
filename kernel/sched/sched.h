@@ -17,6 +17,10 @@
 
 #include <stdint.h>
 
+#include "../vfs/vfs.h" /* VFS_MAX_FDS */
+
+struct vfs_file;
+
 /* Task states. */
 #define TASK_READY   1
 #define TASK_RUNNING 2
@@ -69,6 +73,15 @@ struct task {
     /* Next address for anonymous mmap allocations (see SYS_MMAP). */
     uint64_t mmap_cur;
 
+    /* Per-task file descriptor table (open files, see vfs.c). A new
+     * task inherits a refcounted copy of its creator's table at
+     * spawn (POSIX fd inheritance without fork); task_exit closes
+     * every entry. tsh sets up slots 0/1/2 (redirection, pipes)
+     * before spawning, which is exactly how `a | b` and `> file`
+     * work: the child keeps its copy when the shell restores its
+     * own. */
+    struct vfs_file *fds[VFS_MAX_FDS];
+
     int exit_status;
 };
 
@@ -109,5 +122,9 @@ int sched_task_count(void);
 
 /* Print the task table (ps command): PID, state, name. */
 void task_list_all(void);
+
+/* True while a task with this pid exists and has not exited. The
+ * shell spins on this (hlt) to wait for a spawned pipeline stage. */
+int sched_task_alive(uint32_t pid);
 
 #endif /* TUS_SCHED_SCHED_H */

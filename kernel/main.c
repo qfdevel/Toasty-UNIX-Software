@@ -232,6 +232,12 @@ void _start(void) {
     } else {
         console_write("rootfs       : not loaded (no Limine module)\n");
     }
+
+    /* The scheduler: tsh becomes task 0; the PIT (IRQ0) drives
+     * round-robin switching. This runs BEFORE the device nodes are
+     * registered so the standard descriptors land in task 0's own
+     * fd table (vfs_devices_init opens them into the current task). */
+    sched_init();
     vfs_devices_init();
 
     /* Draw the boot splash: one toast per CPU, boot logs below. */
@@ -241,10 +247,6 @@ void _start(void) {
      * (memcpy, string ops, math). The scheduler now saves/restores
      * FPU state, so user SSE survives task switches. */
     cpu_enable_sse();
-
-    /* The scheduler: tsh becomes task 0; the PIT (IRQ0) drives
-     * round-robin switching. */
-    sched_init();
 
     print_boot_banner();
 

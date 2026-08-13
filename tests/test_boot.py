@@ -92,6 +92,10 @@ def type_text(sock, text):
             sendkey(sock, "spc")
         elif ch == "/":
             sendkey(sock, "slash")
+        elif ch == "|":
+            sendkey(sock, "shift-backslash")
+        elif ch == "<":
+            sendkey(sock, "shift-comma")
         elif ch == ">":
             sendkey(sock, "shift-dot")
         elif ch == ".":
@@ -234,7 +238,7 @@ def main():
 
         # 3. ver (0.8.0 now)
         type_text(sock, "ver\r")
-        offset = wait_for("TUS kernel 0.8.0", offset=offset)
+        offset = wait_for("TUS kernel 0.9.0", offset=offset)
         ok("ver reports the kernel version")
 
         # 4. sysinfo (now with PMM stats and uptime)
@@ -470,6 +474,34 @@ def main():
         offset = wait_for("c", offset=offset)
         type_text(sock, "cd /\r")
         ok("cd - returns to the previous directory, mkdir -p creates parents")
+
+        # 12n. tsh v2.0: pipes and I/O redirection. The shell rewires
+        #      its own fd table (per-task, inherited at spawn), so
+        #      `a | b`, `> file`, `>> file` and `< file` work exactly
+        #      like a real UNIX shell. /bin/echo writes through fd 1,
+        #      which is what makes it a usable pipeline producer.
+        type_text(sock, "echo hello pipe world | grep -c pipe\r")
+        offset = wait_for("1\n", offset=offset)
+        type_text(sock, "echo a1 | sed s/a/b/ | grep -c b1\r")
+        offset = wait_for("1\n", offset=offset)
+        ok("pipes chain stages (echo | grep, echo | sed | grep)")
+
+        type_text(sock, "echo line1 > /tmp/p.txt\r")
+        type_text(sock, "grep -c line1 /tmp/p.txt\r")
+        offset = wait_for("1\n", offset=offset)
+        type_text(sock, "echo line2 >> /tmp/p.txt\r")
+        type_text(sock, "grep -c line /tmp/p.txt\r")
+        offset = wait_for("2\n", offset=offset)
+        ok("> truncates and >> appends (both verified via grep -c)")
+
+        type_text(sock, "sed -n p < /tmp/p.txt | grep -c line2\r")
+        offset = wait_for("1\n", offset=offset)
+        ok("stdin redirection feeds a pipeline")
+
+        type_text(sock, "grep zzz /nonexistent 2> /tmp/e.txt\r")
+        type_text(sock, "cat /tmp/e.txt\r")
+        offset = wait_for("grep: /nonexistent: No such file", offset=offset)
+        ok("2> redirects stderr to a file")
 
         # 13. scrollback: overflow the screen, PageUp shows older
         #     lines, PageDown returns to the exact live view.

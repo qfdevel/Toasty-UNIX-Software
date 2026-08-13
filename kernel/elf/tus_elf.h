@@ -14,7 +14,8 @@
 #include <stdint.h>
 
 /* Load the static ELF at `path` and spawn it as a new ring-3 task.
- * Returns 0 on success, a negative errno otherwise. */
+ * Returns the new PID (>= 0) on success, a negative errno otherwise
+ * (the shell uses the pid to wait for the program to exit). */
 long elf_exec(const char *path, int argc, char **argv);
 
 /* execve: replace the CURRENT task's image with the ELF at `path`.

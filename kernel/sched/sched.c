@@ -113,6 +113,15 @@ int sched_task_count(void) {
     return n;
 }
 
+int sched_task_alive(uint32_t pid) {
+    for (int i = 0; i < TASK_MAX; i++) {
+        if (g_tasks[i].pid == pid && g_tasks[i].state != TASK_ZOMBIE) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 void task_list_all(void) {
     for (int i = 0; i < TASK_MAX; i++) {
         struct task *t = &g_tasks[i];
@@ -268,6 +277,11 @@ int task_create_user(uint64_t entry, const char *name, uint64_t cr3,
     t->gid = 0;
     t->egid = 0;
 
+    /* Inherit the creator's open files: the child runs with the same
+     * fds the shell set up (redirection/pipes) and the shell can
+     * restore its own slots immediately after spawning. */
+    vfs_fd_inherit(t->fds, g_current->fds);
+
     /* Default FPU state (hardware reset values): x87 control word
      * with all exceptions masked, empty x87 tag word, MXCSR with all
      * exceptions masked. fxrstor of a fully zeroed image would leave
@@ -419,9 +433,10 @@ void task_exit(int status) {
      * must give it back so the shell can read again. */
     kbd_input_release(g_current->pid);
 
-    /* Release the task's file descriptors: the fd table is global,
-     * so leaked fds would starve later tasks (VFS_MAX_FDS is 16). */
-    vfs_close_all(g_current->pid);
+    /* Release the task's file descriptors: the fd table is per-task,
+     * and closing the whole table is also what lets a pipe reader
+     * see EOF once its writer exits. */
+    vfs_close_all();
 
     struct task *next = task_next(g_current);
     if (next == g_current) {

@@ -15,25 +15,51 @@
 #include <stdbool.h>
 
 #include "devices.h"
+#include "../arch/x86_64/io.h"
 #include "../core/errno.h"
 #include "../core/klib.h"
 #include "../mm/kmalloc.h"
 #include "../sched/sched.h"
 
+/* An open file description: a reference to either a filesystem node
+ * or a pipe, plus the current position. Multiple fd slots may point
+ * at the same vfs_file (dup/dup2 share the position, like POSIX), so
+ * it is refcounted; the last close frees it. */
 struct vfs_file {
     struct vfs_node *node;
+    struct vfs_pipe *pipe;
     size_t pos;
     int flags;
+    int refs;
+};
+
+/* Pipe: a fixed 4 KiB ring buffer. Readers and writers block in a
+ * hlt() loop while the buffer is empty/full; the 100 Hz PIT tick
+ * preempts the waiter so the peer task gets CPU time. EOF is simply
+ * "empty and no write end open"; -EPIPE is "write end open but no
+ * read end". refs_r/refs_w count the open descriptors per end (one
+ * per vfs_file referencing this pipe). */
+#define PIPE_BUF_SIZE 4096
+
+struct vfs_pipe {
+    uint8_t buf[PIPE_BUF_SIZE];
+    size_t head;  /* read position */
+    size_t count; /* bytes buffered */
+    int refs_r;
+    int refs_w;
 };
 
 static struct vfs_node *g_root;
-static struct vfs_file g_fds[VFS_MAX_FDS];
-static bool g_fd_used[VFS_MAX_FDS];
 
-/* Owner of each fd: the pid that opened it (0 = the kernel shell).
- * When a task exits, all of its fds are closed - without this the
- * global 16-slot table leaks and later programs run out of fds. */
-static uint32_t g_fd_pid[VFS_MAX_FDS];
+/* The fd table lives in the CURRENT task (struct task::fds). This
+ * indirection is what makes redirection and pipelines possible: the
+ * shell sets up its own slots, spawns a child (which inherits a
+ * refcounted copy), then restores its own slots - the child keeps
+ * its copy, so `cmd > file` and `a | b` just work. */
+static struct vfs_file **fd_table(void) {
+    struct task *cur = sched_current();
+    return cur != NULL ? cur->fds : NULL;
+}
 
 /* ---- path helpers ---- */
 
@@ -243,14 +269,44 @@ int vfs_remove(const char *path) {
 
 /* ---- fd table ---- */
 
-static long fd_alloc(struct vfs_node *node, int flags) {
-    for (int i = 3; i < VFS_MAX_FDS; i++) { /* 0..2 are standard fds */
-        if (!g_fd_used[i]) {
-            g_fd_used[i] = true;
-            g_fds[i].node = node;
-            g_fds[i].pos = 0;
-            g_fds[i].flags = flags;
-            g_fd_pid[i] = sched_current() != NULL ? sched_current()->pid : 0;
+static void file_ref(struct vfs_file *f) {
+    f->refs++;
+    if (f->pipe != NULL) {
+        if (f->flags & O_WRONLY) {
+            f->pipe->refs_w++;
+        } else {
+            f->pipe->refs_r++;
+        }
+    }
+}
+
+static void file_unref(struct vfs_file *f) {
+    if (f->pipe != NULL) {
+        if (f->flags & O_WRONLY) {
+            f->pipe->refs_w--;
+        } else {
+            f->pipe->refs_r--;
+        }
+    }
+    if (--f->refs == 0) {
+        /* A pipe lives as long as either end is referenced. */
+        if (f->pipe != NULL && f->pipe->refs_r == 0 && f->pipe->refs_w == 0) {
+            kfree(f->pipe);
+        }
+        kfree(f);
+    }
+}
+
+/* Allocate a fresh slot (3..15; 0..2 are the standard descriptors,
+ * replaced only via dup2, never by open) and take ownership. */
+static long fd_alloc(struct vfs_file *f) {
+    struct vfs_file **tbl = fd_table();
+    if (tbl == NULL) {
+        return -EBADF;
+    }
+    for (int i = 3; i < VFS_MAX_FDS; i++) {
+        if (tbl[i] == NULL) {
+            tbl[i] = f;
             return i;
         }
     }
@@ -258,10 +314,11 @@ static long fd_alloc(struct vfs_node *node, int flags) {
 }
 
 static struct vfs_file *fd_get(long fd) {
-    if (fd < 0 || fd >= VFS_MAX_FDS || !g_fd_used[fd]) {
+    struct vfs_file **tbl = fd_table();
+    if (tbl == NULL || fd < 0 || fd >= VFS_MAX_FDS) {
         return NULL;
     }
-    return &g_fds[fd];
+    return tbl[fd];
 }
 
 /* ---- fd-based API ---- */
@@ -290,26 +347,193 @@ long vfs_open(const char *path, int flags) {
         node->size = 0;
     }
 
-    return fd_alloc(node, flags);
+    struct vfs_file *f = kmalloc(sizeof(*f));
+    if (f == NULL) {
+        return -ENOMEM;
+    }
+    f->node = node;
+    f->pipe = NULL;
+    f->pos = 0;
+    f->flags = flags;
+    f->refs = 1;
+    if (flags & O_APPEND) {
+        f->pos = node->size; /* append: start at the end */
+    }
+
+    return fd_alloc(f);
 }
 
 long vfs_close(long fd) {
-    if (fd_get(fd) == NULL) {
+    struct vfs_file **tbl = fd_table();
+    if (tbl == NULL || fd < 0 || fd >= VFS_MAX_FDS || tbl[fd] == NULL) {
         return -EBADF;
     }
-    g_fd_used[fd] = false;
-    g_fd_pid[fd] = 0;
+    struct vfs_file *f = tbl[fd];
+    tbl[fd] = NULL;
+    file_unref(f);
     return 0;
 }
 
-/* Close every fd opened by `pid` (called from task_exit). */
-void vfs_close_all(uint32_t pid) {
-    for (int i = 3; i < VFS_MAX_FDS; i++) {
-        if (g_fd_used[i] && g_fd_pid[i] == pid) {
-            g_fd_used[i] = false;
-            g_fd_pid[i] = 0;
+long vfs_dup(long oldfd) {
+    struct vfs_file **tbl = fd_table();
+    if (tbl == NULL || oldfd < 0 || oldfd >= VFS_MAX_FDS ||
+        tbl[oldfd] == NULL) {
+        return -EBADF;
+    }
+    for (int i = 0; i < VFS_MAX_FDS; i++) {
+        if (tbl[i] == NULL) {
+            tbl[i] = tbl[oldfd];
+            file_ref(tbl[oldfd]);
+            return i;
         }
     }
+    return -ENOMEM;
+}
+
+long vfs_dup2(long oldfd, long newfd) {
+    struct vfs_file **tbl = fd_table();
+    if (tbl == NULL || oldfd < 0 || oldfd >= VFS_MAX_FDS ||
+        tbl[oldfd] == NULL) {
+        return -EBADF;
+    }
+    if (newfd < 0 || newfd >= VFS_MAX_FDS) {
+        return -EBADF;
+    }
+    if (oldfd == newfd) {
+        return newfd;
+    }
+    if (tbl[newfd] != NULL) {
+        file_unref(tbl[newfd]); /* close the target first */
+    }
+    tbl[newfd] = tbl[oldfd];
+    file_ref(tbl[oldfd]);
+    return newfd;
+}
+
+long vfs_pipe(int fds[2]) {
+    struct vfs_file **tbl = fd_table();
+    if (tbl == NULL) {
+        return -EBADF;
+    }
+    struct vfs_pipe *p = kmalloc(sizeof(*p));
+    if (p == NULL) {
+        return -ENOMEM;
+    }
+    memset(p, 0, sizeof(*p));
+    p->refs_r = 1;
+    p->refs_w = 1;
+
+    struct vfs_file *r = kmalloc(sizeof(*r));
+    struct vfs_file *w = kmalloc(sizeof(*w));
+    if (r == NULL || w == NULL) {
+        kfree(r);
+        kfree(w);
+        kfree(p);
+        return -ENOMEM;
+    }
+    r->node = NULL;
+    r->pipe = p;
+    r->pos = 0;
+    r->flags = O_RDONLY;
+    r->refs = 1;
+    w->node = NULL;
+    w->pipe = p;
+    w->pos = 0;
+    w->flags = O_WRONLY;
+    w->refs = 1;
+
+    long a = fd_alloc(r);
+    long b = fd_alloc(w);
+    if (a < 0 || b < 0) {
+        if (a >= 0) {
+            tbl[a] = NULL;
+        }
+        if (b >= 0) {
+            tbl[b] = NULL;
+        }
+        kfree(r);
+        kfree(w);
+        kfree(p);
+        return -ENOMEM;
+    }
+    fds[0] = (int)a;
+    fds[1] = (int)b;
+    return 0;
+}
+
+/* Close every fd of the current task (called from task_exit; the
+ * exiting task's whole table goes away, which is what lets a pipe
+ * reader observe EOF once its writer exits). */
+void vfs_close_all(void) {
+    struct vfs_file **tbl = fd_table();
+    if (tbl == NULL) {
+        return;
+    }
+    for (int i = 0; i < VFS_MAX_FDS; i++) {
+        if (tbl[i] != NULL) {
+            file_unref(tbl[i]);
+            tbl[i] = NULL;
+        }
+    }
+}
+
+/* Inherit a parent's fd table at task creation (refcounted copy). */
+void vfs_fd_inherit(struct vfs_file **dst, struct vfs_file **src) {
+    for (int i = 0; i < VFS_MAX_FDS; i++) {
+        dst[i] = NULL;
+        if (src[i] != NULL) {
+            dst[i] = src[i];
+            file_ref(src[i]);
+        }
+    }
+}
+
+/* ---- pipes ---- */
+
+static long pipe_read(struct vfs_pipe *p, void *buf, size_t count) {
+    while (p->count == 0) {
+        if (p->refs_w == 0) {
+            return 0; /* EOF: every write end is closed */
+        }
+        hlt(); /* empty: wait for the writer (the tick preempts us) */
+    }
+    size_t n = count < p->count ? count : p->count;
+    size_t first = PIPE_BUF_SIZE - p->head;
+    if (n > first) {
+        memcpy(buf, p->buf + p->head, first);
+        memcpy((uint8_t *)buf + first, p->buf, n - first);
+    } else {
+        memcpy(buf, p->buf + p->head, n);
+    }
+    p->head = (p->head + n) % PIPE_BUF_SIZE;
+    p->count -= n;
+    return (long)n;
+}
+
+static long pipe_write(struct vfs_pipe *p, const void *buf, size_t count) {
+    size_t total = 0;
+    while (total < count) {
+        if (p->refs_r == 0) {
+            return total > 0 ? (long)total : -EPIPE;
+        }
+        if (p->count == PIPE_BUF_SIZE) {
+            hlt(); /* full: wait for the reader to drain */
+            continue;
+        }
+        size_t free = PIPE_BUF_SIZE - p->count;
+        size_t n = count - total < free ? count - total : free;
+        size_t wpos = (p->head + p->count) % PIPE_BUF_SIZE;
+        size_t first = PIPE_BUF_SIZE - wpos;
+        if (n > first) {
+            memcpy(p->buf + wpos, (const uint8_t *)buf + total, first);
+            memcpy(p->buf, (const uint8_t *)buf + total + first, n - first);
+        } else {
+            memcpy(p->buf + wpos, (const uint8_t *)buf + total, n);
+        }
+        p->count += n;
+        total += n;
+    }
+    return (long)total;
 }
 
 static long file_read(struct vfs_file *f, void *buf, size_t count) {
@@ -349,7 +573,7 @@ static long file_write(struct vfs_file *f, const void *buf, size_t count) {
 
 long vfs_ftruncate(long fd, long length) {
     struct vfs_file *f = fd_get(fd);
-    if (f == NULL || f->node->type != VFS_FILE) {
+    if (f == NULL || f->pipe != NULL || f->node->type != VFS_FILE) {
         return -EBADF;
     }
     if (length < 0) {
@@ -393,6 +617,9 @@ long vfs_read(long fd, void *buf, size_t count) {
     if ((f->flags & 3) == O_WRONLY) {
         return -EBADF;
     }
+    if (f->pipe != NULL) {
+        return pipe_read(f->pipe, buf, count);
+    }
 
     struct vfs_node *node = f->node;
     switch (node->type) {
@@ -420,7 +647,7 @@ long vfs_pread(long fd, void *buf, size_t count, size_t offset) {
     if (buf == NULL) {
         return -EINVAL;
     }
-    if (f->node->type != VFS_FILE) {
+    if (f->pipe != NULL || f->node->type != VFS_FILE) {
         return -EISDIR; /* positioned reads only make sense for files */
     }
     if (offset >= f->node->size) {
@@ -444,6 +671,9 @@ long vfs_write(long fd, const void *buf, size_t count) {
     }
     if ((f->flags & 3) == O_RDONLY) {
         return -EBADF;
+    }
+    if (f->pipe != NULL) {
+        return pipe_write(f->pipe, buf, count);
     }
 
     struct vfs_node *node = f->node;
@@ -469,11 +699,11 @@ long vfs_ioctl(long fd, uint64_t request, void *arg) {
     if (f == NULL) {
         return -EBADF;
     }
-    if (f->node->type == VFS_DEVICE && f->node->ops != NULL &&
-        f->node->ops->ioctl != NULL) {
-        return f->node->ops->ioctl(f->node->priv, request, arg);
+    if (f->pipe != NULL || f->node->type != VFS_DEVICE ||
+        f->node->ops == NULL || f->node->ops->ioctl == NULL) {
+        return -ENOTTY;
     }
-    return -ENOTTY;
+    return f->node->ops->ioctl(f->node->priv, request, arg);
 }
 
 long vfs_readdir(long fd, void *buf, size_t count) {
@@ -481,7 +711,7 @@ long vfs_readdir(long fd, void *buf, size_t count) {
     if (f == NULL) {
         return -EBADF;
     }
-    if (f->node->type != VFS_DIR) {
+    if (f->pipe != NULL || f->node->type != VFS_DIR) {
         return -ENOTDIR;
     }
     if (buf == NULL) {
@@ -595,10 +825,21 @@ void vfs_devices_init(void) {
     struct vfs_node *tty0 = vfs_lookup("/dev/tty0");
     if (tty0 != NULL) {
         for (int i = 0; i < 3; i++) {
-            g_fd_used[i] = true;
-            g_fds[i].node = tty0;
-            g_fds[i].pos = 0;
-            g_fds[i].flags = O_RDWR;
+            struct vfs_file *f = kmalloc(sizeof(*f));
+            if (f == NULL) {
+                continue;
+            }
+            f->node = tty0;
+            f->pipe = NULL;
+            f->pos = 0;
+            f->flags = O_RDWR;
+            f->refs = 1;
+            struct vfs_file **tbl = fd_table();
+            if (tbl == NULL) {
+                kfree(f);
+                continue;
+            }
+            tbl[i] = f;
         }
     }
 }

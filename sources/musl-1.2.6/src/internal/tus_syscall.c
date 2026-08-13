@@ -46,6 +46,9 @@
 #define TUS_SYS_SETUID   22
 #define TUS_SYS_GETGID   23
 #define TUS_SYS_SETGID   24
+#define TUS_SYS_PIPE     25
+#define TUS_SYS_DUP2     26
+#define TUS_SYS_DUP      27
 
 #define TUS_ENOSYS (-38)
 #define TUS_EFAULT (-14)
@@ -127,6 +130,9 @@ long tus_syscall(long n, long a1, long a2, long a3,
     case 11:  return tus_raw(TUS_SYS_MUNMAP, a1, a2, 0, 0, 0, 0);   /* munmap */
     case 16:  return tus_raw(TUS_SYS_IOCTL, a1, a2, a3, 0, 0, 0);   /* ioctl */
     case 20:  return tus_raw(TUS_SYS_WRITEV, a1, a2, a3, 0, 0, 0);  /* writev */
+    case 22:  return tus_raw(TUS_SYS_PIPE, a1, 0, 0, 0, 0, 0);      /* pipe(fds) */
+    case 32:  return tus_raw(TUS_SYS_DUP, a1, 0, 0, 0, 0, 0);       /* dup */
+    case 33:  return tus_raw(TUS_SYS_DUP2, a1, a2, 0, 0, 0, 0);     /* dup2 */
     case 39:  return tus_raw(TUS_SYS_GETPID, 0, 0, 0, 0, 0, 0);     /* getpid */
     case 59:  return tus_raw(TUS_SYS_EXECVE, a1, a2, a3, 0, 0, 0);  /* execve */
     case 60:  return tus_raw(TUS_SYS_EXIT, a1, 0, 0, 0, 0, 0);      /* exit */

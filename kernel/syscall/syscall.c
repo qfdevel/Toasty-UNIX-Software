@@ -303,7 +303,24 @@ long syscall_dispatch(struct syscall_regs *r, uint64_t cs, uint64_t frame_rsp) {
     case SYS_EXIT:
         return sys_exit((int)r->rdi);
     case SYS_EXECVE:
-        return sys_execve(r, from_user, frame_rsp);    case SYS_READ:
+        return sys_execve(r, from_user, frame_rsp);
+    case SYS_PIPE: {
+        int fds[2];
+        long ret = vfs_pipe(fds);
+        if (ret < 0) {
+            return ret;
+        }
+        if (!access_ok(from_user, (void *)r->rdi, 2 * sizeof(int))) {
+            return -EFAULT;
+        }
+        ((int *)(uintptr_t)r->rdi)[0] = fds[0];
+        ((int *)(uintptr_t)r->rdi)[1] = fds[1];
+        return 0;
+    }
+    case SYS_DUP2:
+        return vfs_dup2(r->rdi, r->rsi);
+    case SYS_DUP:
+        return vfs_dup(r->rdi);    case SYS_READ:
         if (!access_ok(from_user, (void *)r->rsi, (size_t)r->rdx)) {
             return -EFAULT;
         }

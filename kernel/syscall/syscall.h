@@ -47,6 +47,10 @@
 #define SYS_SETUID   22 /* setuid(uid) */
 #define SYS_GETGID   23 /* getgid() */
 #define SYS_SETGID   24 /* setgid(gid) */
+/* v2.0 (2026-08-13): pipes + dup for I/O redirection. */
+#define SYS_PIPE     25 /* pipe(int fds[2]) */
+#define SYS_DUP2     26 /* dup2(oldfd, newfd) */
+#define SYS_DUP      27 /* dup(oldfd) */
 
 /* IDT entry stub (vector 0x80). Installed by idt_init(). */
 void syscall_entry(void);

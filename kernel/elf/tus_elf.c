@@ -174,7 +174,7 @@ long elf_exec(const char *path, int argc, char **argv) {
     kprintf("exec: %s started as pid %d (entry 0x%llx, ring 3, cr3 0x%llx)\n",
             path, pid, (unsigned long long)ctx.ehdr.e_entry,
             (unsigned long long)cr3);
-    return 0;
+    return pid; /* the shell waits on this */
 }
 
 /* ---- execve: replace the current task's image ---- */

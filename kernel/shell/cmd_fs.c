@@ -317,16 +317,21 @@ static int cmd_cat(int argc, char **argv) {
 /* ---- echo (with `> file` redirection) ---- */
 
 static int cmd_echo(int argc, char **argv) {
-    /* Detect a ">" redirection: echo a b > path */
+    /* Detect a ">" / ">>" redirection: echo a b > path */
     long fd = 1; /* stdout by default */
     int end_arg = argc;
     char resolved[PATH_BUF];
 
     for (int i = 1; i < argc; i++) {
+        int flags = -1;
         if (strcmp(argv[i], ">") == 0 && i + 1 < argc) {
+            flags = O_WRONLY | O_CREAT | O_TRUNC;
+        } else if (strcmp(argv[i], ">>") == 0 && i + 1 < argc) {
+            flags = O_WRONLY | O_CREAT | O_APPEND;
+        }
+        if (flags >= 0) {
             path_resolve(argv[i + 1], resolved, sizeof(resolved));
-            fd = syscall(SYS_OPEN, (long)resolved,
-                         O_WRONLY | O_CREAT | O_TRUNC, 0, 0, 0);
+            fd = syscall(SYS_OPEN, (long)resolved, flags, 0, 0, 0);
             if (fd < 0) {
                 print_syscall_error("echo", fd);
                 return 1;

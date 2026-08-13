@@ -23,6 +23,7 @@
 #define ENOTTY  25 /* inappropriate ioctl for device */
 #define ENOSPC  28 /* no space left on device */
 #define ENOEXEC 8  /* exec format error */
+#define EPIPE   32 /* broken pipe: write to a pipe with no readers */
 #define ENOSYS  38 /* function not implemented */
 
 #endif /* TUS_CORE_ERRNO_H */

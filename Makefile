@@ -74,7 +74,8 @@ USER_TOOLS := $(ROOTFS_DIR)/bin/doas \
               $(ROOTFS_DIR)/bin/passwd \
               $(ROOTFS_DIR)/bin/login \
               $(ROOTFS_DIR)/bin/grep \
-              $(ROOTFS_DIR)/bin/sed
+              $(ROOTFS_DIR)/bin/sed \
+              $(ROOTFS_DIR)/bin/echo
 
 .PHONY: all iso run run-smp test clean clean-musl musl
 
@@ -172,6 +173,12 @@ $(ROOTFS_DIR)/bin/sed: userspace/sed.c $(MUSL_LIB)/libc.a
 	$(LD) $(USER_LDFLAGS) -o $@ \
 		$(MUSL_LIB)/crt1.o $(MUSL_LIB)/crti.o $(BUILD)/userspace/sed.o $(MUSL_LINK)
 
+$(ROOTFS_DIR)/bin/echo: userspace/echo.c $(MUSL_LIB)/libc.a
+	@mkdir -p $(ROOTFS_DIR)/bin $(BUILD)/userspace
+	$(CC) $(USER_CFLAGS) -nostdinc -I$(MUSL_INC) -c $< -o $(BUILD)/userspace/echo.o
+	$(LD) $(USER_LDFLAGS) -o $@ \
+		$(MUSL_LIB)/crt1.o $(MUSL_LIB)/crti.o $(BUILD)/userspace/echo.o $(MUSL_LINK)
+
 # ---- rootfs image ----
 
 $(ROOTFS_IMG): $(USER_ELFS) $(USER_TOOLS) $(ROOTFS_FILES)
@@ -182,7 +189,8 @@ $(ROOTFS_IMG): $(USER_ELFS) $(USER_TOOLS) $(ROOTFS_FILES)
 	chmod 755 $(ROOTFS_DIR)/bin/hello $(ROOTFS_DIR)/bin/enforce \
 	          $(ROOTFS_DIR)/bin/musl_hello $(ROOTFS_DIR)/bin/kilo \
 	          $(ROOTFS_DIR)/bin/useradd $(ROOTFS_DIR)/bin/login \
-	          $(ROOTFS_DIR)/bin/grep $(ROOTFS_DIR)/bin/sed
+	          $(ROOTFS_DIR)/bin/grep $(ROOTFS_DIR)/bin/sed \
+	          $(ROOTFS_DIR)/bin/echo
 	chmod 4555 $(ROOTFS_DIR)/bin/doas $(ROOTFS_DIR)/bin/passwd
 	tar --format=ustar -C $(ROOTFS_DIR) -cf $@ .
 
