@@ -430,6 +430,87 @@ into a local before the loop.
   shell.
 - All v0.6.0 checks still pass (kilo, scrollback, fbfill, panic dump).
 
+## 4e. Kernel state (v0.8.0 — /bin, execve, system tools, 2026-08-13)
+
+### 4e.1 UNIX file layout
+
+- User programs moved from `/boot/*.elf` to **`/bin/<name>`** with NO
+  extensions — executability is decided by the **x bit** (the kernel
+  checks `mode & 0111` on exec), never a file extension.
+- tsh does a **PATH lookup**: a bare command name (`kilo`) runs
+  `/bin/kilo` (absolute paths still go through `exec`).
+- vfs_node carries real **mode bits** (from the tar + defaults);
+  `ls -l` prints `-rwxr-xr-x` (owner/group root), the SUID bit shows
+  as `s`. The image build sets **4555 on doas and passwd**, 755 on
+  the rest — exactly the initramfs pattern from the spec.
+
+### 4e.2 execve + uid/gid syscalls
+
+- **SYS_EXECVE (18)**: replaces the CALLING task's image. The ELF is
+  loaded into a fresh address space, the task's CR3/name/stack are
+  switched, and the live interrupt frame on the kernel stack is
+  rewritten so the syscall's IRETQ lands in the new program. argv is
+  copied out of user memory; the program name is prepended as argv[0]
+  (so doas passes its argv verbatim). User-only (-EPERM from ring 0).
+- SYS_CHMOD (19), SYS_GETUID/GETEUID/SETUID/GETGID/SETGID (20-24):
+  every task tracks uid/gid (default 0 = root; no privilege model yet,
+  but the ids are queryable/settable — doas/passwd/login use them).
+- musl bridge: Linux 59/90/102/104/105/106/107/108 mapped; **the musl
+  libc now rebuilds when tus_syscall.c changes** (it used to be a
+  stale-artifact trap).
+
+### 4e.3 userspace/ system tools (musl, statically linked)
+
+- **doas** — TUS port of OpenBSD doas (no PAM/BSD auth): parses
+  `/etc/doas.conf` (`permit/deny [nopass] [keepenv] user [as target]
+  [cmd args...]`, last match wins, `:group` idents), `-n -s -u -C`,
+  password prompt with echo off, PATH lookup for bare command names,
+  then `setuid(0)` + `execve`. Ships SUID 4555.
+- **useradd** — full account creation: /etc/passwd + /etc/shadow
+  (locked by default, `-p` hashes with crypt) + /etc/group (user
+  group), `-m` home dirs (parents created), `-s -u -g -c -d -b -r -M
+  -D`, name validation, standard exit codes (0/1/2/3/4/6/9/10/12/19).
+- **passwd** — current-password check (root bypasses), new password
+  twice with echo off, crypt() ($6$), `-d -l -u -S -n -x -w -i`,
+  /etc/shadow rewrite. Ships SUID 4555.
+- **login** — username + echo-off password, /etc/shadow verification
+  (3 retries), prints account info + /etc/motd. (No fork/exec shell
+  replacement yet — the session remains the calling tsh.)
+- **grep** — own backtracking regex engine (BRE+ERE: literals,
+  classes with ranges + POSIX names, ^ $, * + ? {n,m}, groups,
+  top-level alternation; no backrefs), options -i -v -n -c -l -o -q
+  -s -w -x -E -F -e -f -H -h -m -A -B -C, exit codes 0/1/2.
+- **sed** — stream editor: addresses (N, $, /re/, ranges, first~step),
+  s/// (& and basic escapes), d p q = y a i c h H g G x n, labels,
+  -n -e -f -i -E.
+- **ls** — sorted, `-a`, `-l` with mode strings; **cd** — `cd -`
+  (OLDPWD) and `~`; **mkdir** — `-p -v -m`.
+
+### 4e.4 Bugs found & fixed along the way
+
+1. **argv strings on the user stack**: they lived at the BOTTOM of the
+   top stack page; programs using >4 KiB of stack (grep/sed/passwd)
+   silently overwrote argv → garbage output (passwd printed the crypt
+   hash as the user name!). Now the strings sit at the TOP of the
+   page, the pointer array below, RSP below that — the downward
+   growing stack can never reach them. User stacks are 64 KiB now
+   (the regex engine recurses per repetition for `.*`).
+2. **fd table leak**: elf_exec never closed the binary's fd on the
+   success path — each exec leaked one of the 16 global slots, so
+   after ~13 programs every fopen failed with ENOMEM (doas:
+   "permission denied" because /etc/doas.conf couldn't be opened).
+   fds now record their owner pid and task_exit closes them.
+3. **task slots never recycled**: TASK_MAX=16, zombies stayed in the
+   table → the 16th exec failed ("cannot create task").
+   task_find_slot() reuses zombie slots.
+
+### 4e.5 Verified flow (make test, 39/39)
+
+- New checks: ls -l SUID bits, bare-name PATH lookup, grep (-n -i -c
+  -v), sed (s///, -n 1p), useradd (passwd file + home), doas
+  (useradd as root via execve), passwd (crypt + status P), login
+  (authentication + motd), cd - / mkdir -p. All v0.7.0 checks intact.
+
 ## 4a. Kernel state (v0.1.0 — archived 2026-08-12)
 Boots from the ISO in QEMU (BIOS), serial + framebuffer console,
 interrupt-driven PS/2 keyboard, and an interactive `tsh`. Verified by

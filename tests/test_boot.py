@@ -232,9 +232,9 @@ def main():
         offset = wait_for("hi", offset=offset)
         ok("echo prints its arguments")
 
-        # 3. ver (0.7.0 now)
+        # 3. ver (0.8.0 now)
         type_text(sock, "ver\r")
-        offset = wait_for("TUS kernel 0.7.0", offset=offset)
+        offset = wait_for("TUS kernel 0.8.0", offset=offset)
         ok("ver reports the kernel version")
 
         # 4. sysinfo (now with PMM stats and uptime)
@@ -255,23 +255,28 @@ def main():
         offset = wait_for("uptime:", offset=offset)
         ok("uptime reports elapsed time via the PIT")
 
-        # 7. VFS: ls / (the whole tree now comes from rootfs.img:
-        #    dev, tmp, etc, boot + logo.ppm; listing order follows
-        #    the tar's entry order, so dev comes before etc, logo.ppm
-        #    before boot)
+        # 7. VFS: ls / (the tree comes from rootfs.img; ls now sorts
+        #    alphabetically like a real UNIX ls)
         type_text(sock, "ls /\r")
+        offset = wait_for("bin", offset=offset)
         offset = wait_for("dev", offset=offset)
         offset = wait_for("etc", offset=offset)
         offset = wait_for("logo.ppm", offset=offset)
-        offset = wait_for("boot", offset=offset)
-        ok("ls / lists the rootfs tree (dev tmp etc boot + logo.ppm)")
+        ok("ls / lists the rootfs tree (bin dev etc tmp + logo.ppm)")
 
-        # 8. VFS: ls /dev shows the device nodes (list order is
-        #    reverse creation order: zero, null, serial0, kbd0, tty0, fb0)
+        # 7b. ls -l shows real permission bits incl. the SUID 's' on
+        #     doas/passwd (set in the image build, like an initramfs).
+        type_text(sock, "ls -l /bin\r")
+        offset = wait_for("-r-sr-xr-x", offset=offset)
+        offset = wait_for("doas", offset=offset)
+        offset = wait_for("passwd", offset=offset)
+        ok("ls -l shows permission bits and the SUID bit on doas/passwd")
+
+        # 8. VFS: ls /dev shows the device nodes (sorted now).
         type_text(sock, "ls /dev\r")
-        offset = wait_for("zero", offset=offset)
-        offset = wait_for("tty0", offset=offset)
         offset = wait_for("fb0", offset=offset)
+        offset = wait_for("tty0", offset=offset)
+        offset = wait_for("zero", offset=offset)
         ok("ls /dev lists the built-in devices")
 
         # 9. cat /etc/motd
@@ -316,19 +321,22 @@ def main():
         offset = wait_for("/\n", offset=offset)
         ok("cd .. walks up, cd / returns to the root")
 
-        # 12. ELF loader: run the embedded static binary as a ring-3 task
-        type_text(sock, "ls /boot\r")
-        offset = wait_for("hello.elf", offset=offset)
-        type_text(sock, "exec /boot/hello.elf\r")
+        # 12. UNIX PATH lookup: a bare command name runs /bin/<name>
+        #     (executability comes from the x bit, not an extension).
+        type_text(sock, "ls /bin\r")
+        offset = wait_for("hello", offset=offset)
+        offset = wait_for("kilo", offset=offset)
+        offset = wait_for("useradd", offset=offset)
+        type_text(sock, "hello\r")
         offset = wait_for("started as pid", offset=offset)
         offset = wait_for("Hello from a static ELF", offset=offset)
-        ok("exec runs a static ELF image as a ring-3 task")
+        ok("bare 'hello' runs /bin/hello via the PATH lookup")
 
         # 12b. Address-space isolation: a second instance loads at the
         #      SAME link address (0x10000000) in its own private
         #      address space. With per-task CR3 this works; a shared
         #      address space would collide on the second load.
-        type_text(sock, "exec /boot/hello.elf\r")
+        type_text(sock, "hello\r")
         offset = wait_for("started as pid", offset=offset)
         offset = wait_for("Hello from a static ELF", offset=offset)
         ok("second exec runs at the same link address (per-task address space)")
@@ -342,7 +350,7 @@ def main():
         # 12d. Ring-3 enforcement: a user program passing a KERNEL
         #      address as a write() buffer must get -EFAULT (-14),
         #      never a write into kernel memory.
-        type_text(sock, "exec /boot/enforce.elf\r")
+        type_text(sock, "enforce\r")
         offset = wait_for("started as pid", offset=offset)
         offset = wait_for("-14", offset=offset)
         ok("ring-3 syscall rejects kernel pointers with -EFAULT")
@@ -352,11 +360,11 @@ def main():
         #      through mmap, strlen through SSE2 asm (FPU context
         #      switching), getpid through the ABI, TLS/errno through
         #      arch_prctl(ARCH_SET_FS), fopen through openat.
-        type_text(sock, "exec /boot/musl_hello.elf\r")
+        type_text(sock, "musl_hello\r")
         offset = wait_for("started as pid", offset=offset)
         offset = wait_for("musl 1.2.6 on TUS: hello from libc", offset=offset)
         offset = wait_for("argc=1", offset=offset)
-        offset = wait_for("argv0=/boot/musl_hello.elf", offset=offset)
+        offset = wait_for("argv0=/bin/musl_hello", offset=offset)
         offset = wait_for("pid=", offset=offset)
         offset = wait_for("malloc: heap string", offset=offset)
         offset = wait_for("free ok", offset=offset)
@@ -369,7 +377,7 @@ def main():
         #      ANSI/VT100 output path (cursor, erase, SGR, status bar),
         #      argv forwarding through exec, and file save via
         #      ftruncate + write. kilo itself needed NO source changes.
-        type_text(sock, "exec /boot/kilo.elf /kilo.txt\r")
+        type_text(sock, "kilo /kilo.txt\r")
         offset = wait_for("started as pid", offset=offset)
         offset = wait_for("/kilo.txt - 0 lines", offset=offset)
         ok("kilo starts with the filename in the status bar")
@@ -398,6 +406,70 @@ def main():
         type_text(sock, "cat /kilo.txt\r")
         offset = wait_for("hello", offset=offset)
         ok("kilo-saved file reads back through the shell")
+
+        # 12g. UNIX tools: grep (BRE/ERE engine, options).
+        type_text(sock, "echo hello world > /tmp/t.txt\r")
+        type_text(sock, "grep world /tmp/t.txt\r")
+        offset = wait_for("hello world", offset=offset)
+        type_text(sock, "grep -n -i HELLO /tmp/t.txt\r")
+        offset = wait_for("1:hello world", offset=offset)
+        type_text(sock, "grep -c o /tmp/t.txt\r")
+        offset = wait_for("1\n", offset=offset)
+        type_text(sock, "grep -v nope /tmp/t.txt\r")
+        offset = wait_for("hello world", offset=offset)
+        ok("grep searches lines: plain, -n -i, -c, -v")
+
+        # 12h. sed (stream editor).
+        type_text(sock, "sed s/world/tus/ /tmp/t.txt\r")
+        offset = wait_for("hello tus", offset=offset)
+        type_text(sock, "sed -n 1p /etc/motd\r")
+        offset = wait_for("Welcome to TUS", offset=offset)
+        ok("sed substitutes and prints with addresses")
+
+        # 12i. useradd: real /etc/passwd + /etc/group + home dir.
+        type_text(sock, "useradd -m -s /bin/tsh ahmet\r")
+        offset = wait_for("user ahmet added (uid 1000", offset=offset)
+        type_text(sock, "cat /etc/passwd\r")
+        offset = wait_for("ahmet:x:1000:1000::/home/ahmet:/bin/tsh", offset=offset)
+        ok("useradd creates the account in /etc/passwd")
+
+        # 12j. doas: config check, PATH lookup, execve to root command.
+        type_text(sock, "doas useradd -m veli\r")
+        offset = wait_for("user veli added", offset=offset)
+        type_text(sock, "cat /etc/passwd\r")
+        offset = wait_for("veli:x:1000:1000::/home/veli", offset=offset)
+        ok("doas runs a command as root (execve + /bin PATH)")
+
+        # 12k. passwd: crypt() hashing into /etc/shadow, then login
+        #      authenticates against it (echo-off password prompt).
+        type_text(sock, "passwd ahmet\r")
+        offset = wait_for("New password:", offset=offset)
+        type_text(sock, "test123\r")
+        offset = wait_for("Retype new password:", offset=offset)
+        type_text(sock, "test123\r")
+        offset = wait_for("password for ahmet updated", offset=offset)
+        type_text(sock, "passwd -S ahmet\r")
+        offset = wait_for("ahmet P", offset=offset)
+        ok("passwd hashes and stores the password (status P)")
+
+        # 12l. login: verifies /etc/shadow and starts the session.
+        type_text(sock, "login ahmet\r")
+        offset = wait_for("Password:", offset=offset)
+        type_text(sock, "test123\r")
+        offset = wait_for("Welcome to TUS, ahmet!", offset=offset)
+        offset = wait_for("uid=1000", offset=offset)
+        offset = wait_for("Work everywhere", offset=offset)
+        ok("login authenticates and prints the motd")
+
+        # 12m. cd - (OLDPWD) and mkdir -p.
+        type_text(sock, "cd /tmp\r")
+        type_text(sock, "cd -\r")
+        offset = wait_for("/tmp\n", offset=offset)
+        type_text(sock, "mkdir -p /tmp/a/b/c\r")
+        type_text(sock, "ls /tmp/a/b\r")
+        offset = wait_for("c", offset=offset)
+        type_text(sock, "cd /\r")
+        ok("cd - returns to the previous directory, mkdir -p creates parents")
 
         # 13. scrollback: overflow the screen, PageUp shows older
         #     lines, PageDown returns to the exact live view.

@@ -16,8 +16,11 @@
 #include "core/console.h"
 #include "core/klib.h"
 #include "drivers/fb.h"
+#include "drivers/keyboard.h"
 #include "drivers/pit.h"
+#include "elf/tus_elf.h"
 #include "mm/pmm.h"
+#include "vfs/vfs.h"
 
 #define MAX_ARGS 16
 
@@ -66,7 +69,7 @@ static int cmd_clear(int argc, char **argv) {
 static int cmd_ver(int argc, char **argv) {
     (void)argc;
     (void)argv;
-    kprintf("TUS kernel 0.7.0, built with %s\n", __VERSION__);
+    kprintf("TUS kernel 0.8.0, built with %s\n", __VERSION__);
     return 0;
 }
 
@@ -190,6 +193,26 @@ void command_execute(const char *line) {
         if (strcmp(argv[0], g_fs_commands[i].name) == 0) {
             g_fs_commands[i].run(argc, argv);
             return;
+        }
+    }
+
+    /* UNIX PATH lookup: a bare command name (no slash) is searched in
+     * /bin, exactly like a real shell searches $PATH. Executability is
+     * decided by the x permission bit, never by a file extension. The
+     * spawned task takes over the console keyboard like `exec` does. */
+    if (strchr(argv[0], '/') == NULL) {
+        char pbin[128];
+        size_t n = strlen(argv[0]);
+        if (n + 6 < sizeof(pbin)) { /* "/bin/" + name */
+            memcpy(pbin, "/bin/", 5);
+            memcpy(pbin + 5, argv[0], n + 1);
+            struct vfs_node *node = vfs_lookup(pbin);
+            if (node != NULL && node->type == VFS_FILE &&
+                (node->mode & 0111) != 0) {
+                kbd_input_release(kbd_input_owner());
+                elf_exec(pbin, argc - 1, &argv[1]);
+                return;
+            }
         }
     }
 

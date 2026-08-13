@@ -97,18 +97,25 @@ int vfs_mount_rootfs(const void *image, size_t size) {
         const char *name = (const char *)p;
         char type = (char)p[156];
         uint64_t fsize = tar_octal((const char *)p + 124, 12);
+        uint32_t mode = (uint32_t)tar_octal((const char *)p + 100, 8);
 
         char name_buf[101];
         const char *path = tar_normalise(name, name_buf, sizeof(name_buf));
         if (path != NULL) {
             if (type == '5') {
                 /* Directory entry. */
-                vfs_create_dir(path);
+                struct vfs_node *dir = vfs_create_dir(path);
+                if (dir != NULL && mode != 0) {
+                    dir->mode = mode;
+                }
             } else if (type == '0' || type == '\0') {
                 /* Regular file. */
                 struct vfs_node *node = vfs_create_file(path);
                 if (node == NULL) {
                     return -1; /* path collision or out of memory */
+                }
+                if (mode != 0) {
+                    node->mode = mode;
                 }
                 if (fsize > 0) {
                     node->data = kmalloc((size_t)fsize);

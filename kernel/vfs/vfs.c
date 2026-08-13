@@ -18,6 +18,7 @@
 #include "../core/errno.h"
 #include "../core/klib.h"
 #include "../mm/kmalloc.h"
+#include "../sched/sched.h"
 
 struct vfs_file {
     struct vfs_node *node;
@@ -28,6 +29,11 @@ struct vfs_file {
 static struct vfs_node *g_root;
 static struct vfs_file g_fds[VFS_MAX_FDS];
 static bool g_fd_used[VFS_MAX_FDS];
+
+/* Owner of each fd: the pid that opened it (0 = the kernel shell).
+ * When a task exits, all of its fds are closed - without this the
+ * global 16-slot table leaks and later programs run out of fds. */
+static uint32_t g_fd_pid[VFS_MAX_FDS];
 
 /* ---- path helpers ---- */
 
@@ -153,6 +159,7 @@ struct vfs_node *vfs_create_dir(const char *path) {
     }
     memset(node, 0, sizeof(*node));
     node->type = VFS_DIR;
+    node->mode = 0755;
     memcpy(node->name, name, strlen(name) + 1);
     return dir_attach(parent, node);
 }
@@ -174,6 +181,7 @@ struct vfs_node *vfs_create_file(const char *path) {
     }
     memset(node, 0, sizeof(*node));
     node->type = VFS_FILE;
+    node->mode = 0644;
     memcpy(node->name, name, strlen(name) + 1);
     return dir_attach(parent, node);
 }
@@ -196,6 +204,7 @@ struct vfs_node *vfs_create_device(const char *path,
     }
     memset(node, 0, sizeof(*node));
     node->type = VFS_DEVICE;
+    node->mode = 0600;
     node->ops = ops;
     node->priv = priv;
     memcpy(node->name, name, strlen(name) + 1);
@@ -241,6 +250,7 @@ static long fd_alloc(struct vfs_node *node, int flags) {
             g_fds[i].node = node;
             g_fds[i].pos = 0;
             g_fds[i].flags = flags;
+            g_fd_pid[i] = sched_current() != NULL ? sched_current()->pid : 0;
             return i;
         }
     }
@@ -288,7 +298,18 @@ long vfs_close(long fd) {
         return -EBADF;
     }
     g_fd_used[fd] = false;
+    g_fd_pid[fd] = 0;
     return 0;
+}
+
+/* Close every fd opened by `pid` (called from task_exit). */
+void vfs_close_all(uint32_t pid) {
+    for (int i = 3; i < VFS_MAX_FDS; i++) {
+        if (g_fd_used[i] && g_fd_pid[i] == pid) {
+            g_fd_used[i] = false;
+            g_fd_pid[i] = 0;
+        }
+    }
 }
 
 static long file_read(struct vfs_file *f, void *buf, size_t count) {
@@ -481,6 +502,7 @@ long vfs_readdir(long fd, void *buf, size_t count) {
         memcpy(d->name, n->name, strlen(n->name) + 1);
         d->type = n->type;
         d->size = (uint32_t)n->size;
+        d->mode = n->mode;
         written += sizeof(struct vfs_dirent);
         f->pos++;
         n = n->sibling;
@@ -488,7 +510,7 @@ long vfs_readdir(long fd, void *buf, size_t count) {
     return (long)written;
 }
 
-long vfs_mkdir(const char *path) {
+long vfs_mkdir(const char *path, uint32_t mode) {
     if (path == NULL) {
         return -EINVAL;
     }
@@ -496,8 +518,12 @@ long vfs_mkdir(const char *path) {
     if (existing != NULL) {
         return -EEXIST;
     }
-    if (vfs_create_dir(path) == NULL) {
+    struct vfs_node *dir = vfs_create_dir(path);
+    if (dir == NULL) {
         return -ENOENT;
+    }
+    if (mode != 0) {
+        dir->mode = mode;
     }
     return 0;
 }
@@ -512,6 +538,18 @@ long vfs_unlink(const char *path) {
     if (vfs_remove(path) != 0) {
         return -EISDIR; /* non-empty directory or removal failure */
     }
+    return 0;
+}
+
+long vfs_chmod(const char *path, uint32_t mode) {
+    if (path == NULL) {
+        return -EINVAL;
+    }
+    struct vfs_node *node = vfs_lookup(path);
+    if (node == NULL) {
+        return -ENOENT;
+    }
+    node->mode = mode;
     return 0;
 }
 

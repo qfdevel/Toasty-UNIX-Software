@@ -7,8 +7,8 @@ rootfs.img
 iso_root/
 build/
 
-# Rootfs staging: user binaries are built into rootfs/boot/
-rootfs/boot/*.elf
+# Rootfs staging: user binaries are built into rootfs/bin/
+rootfs/bin/*
 
 # Logs
 *.log

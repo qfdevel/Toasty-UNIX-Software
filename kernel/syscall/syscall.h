@@ -39,6 +39,14 @@
  * truncation. */
 #define SYS_TIME     16 /* time(NULL): seconds since boot */
 #define SYS_FTRUNCATE 17 /* ftruncate(fd, length) */
+/* v0.8.0: execve + uid/gid (doas, passwd, login, useradd). */
+#define SYS_EXECVE   18 /* execve(path, argv, envp) - replaces the task */
+#define SYS_CHMOD    19 /* chmod(path, mode) */
+#define SYS_GETUID   20 /* getuid() */
+#define SYS_GETEUID  21 /* geteuid() */
+#define SYS_SETUID   22 /* setuid(uid) */
+#define SYS_GETGID   23 /* getgid() */
+#define SYS_SETGID   24 /* setgid(gid) */
 
 /* IDT entry stub (vector 0x80). Installed by idt_init(). */
 void syscall_entry(void);

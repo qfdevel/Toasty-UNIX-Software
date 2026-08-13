@@ -1,0 +1,9 @@
+NAME="Toasty UNIX Software"
+VERSION="0.7.0"
+ID=tus
+ID_LIKE=unix
+VERSION_ID="0.7.0"
+PRETTY_NAME="Toasty UNIX Software"
+ANSI_COLOR="1;33"
+HOME_URL="https://github.com/p1radev/TUS"
+BUG_REPORT_URL="https://github.com/TUS/issues"

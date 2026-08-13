@@ -40,6 +40,7 @@ struct vfs_dirent {
     char name[VFS_NAME_MAX];
     uint32_t type;
     uint32_t size;
+    uint32_t mode; /* permission bits (for ls -l) */
 };
 
 /* Device driver interface. `pos` is the fd's current position. */
@@ -52,6 +53,16 @@ struct file_ops {
 struct vfs_node {
     char name[VFS_NAME_MAX];
     uint32_t type;
+
+    /* Permission bits (rwxrwxrwx + setuid/setgid/sticky, tar-style).
+     * Files created by the kernel default to 0644, directories and
+     * devices to 0755/0600; the rootfs tar supplies the real modes
+     * (e.g. 4555 for doas and passwd). The x bit gates exec, the
+     * setuid bit is reported by ls -l and honoured by userspace
+     * tools (no kernel privilege model exists yet). */
+    uint32_t mode;
+    uint32_t uid;
+    uint32_t gid;
 
     /* Regular file contents. */
     uint8_t *data;
@@ -93,12 +104,18 @@ long vfs_write(long fd, const void *buf, size_t count);
 long vfs_ioctl(long fd, uint64_t request, void *arg);
 long vfs_ftruncate(long fd, long length);
 long vfs_readdir(long fd, void *buf, size_t count);
-long vfs_mkdir(const char *path);
+long vfs_mkdir(const char *path, uint32_t mode);
 long vfs_unlink(const char *path);
+
+/* Close every fd opened by `pid` (called from task_exit). */
+void vfs_close_all(uint32_t pid);
 
 /* Read from a file at an explicit offset, without moving the fd's
  * position (used by the ELF loader). Returns bytes read or -errno. */
 long vfs_pread(long fd, void *buf, size_t count, size_t offset);
+
+/* Change the permission bits of a node (chmod). */
+long vfs_chmod(const char *path, uint32_t mode);
 
 /* Return the node for a path, or NULL. */
 struct vfs_node *vfs_lookup(const char *path);

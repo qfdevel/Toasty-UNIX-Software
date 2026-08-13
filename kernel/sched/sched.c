@@ -29,6 +29,7 @@
 #include "mm/pmm.h"
 #include "mm/vmm.h"
 #include "drivers/keyboard.h"
+#include "vfs/vfs.h"
 
 /* Selectors from gdt.c (duplicated here to keep sched.c self-contained
  * for the fake IRETQ frame; they must match gdt.c). User segments are
@@ -36,7 +37,8 @@
 #define SEL_USER_CODE 0x1B /* 0x18 | RPL 3 */
 #define SEL_USER_DATA 0x23 /* 0x20 | RPL 3 */
 
-#define STACK_SIZE 16384   /* 16 KiB kernel and user stacks */
+#define STACK_SIZE 16384   /* kernel stacks: 16 KiB */
+#define USER_STACK_SIZE 65536 /* user stacks: 64 KiB (grep/sed recursion) */
 /* Frame words: 9 caller-saved + 6 callee-saved (rbx rbp r12-r15) + 5
  * IRETQ fields. The callee-saved registers MUST travel with the task:
  * a tick can preempt ring-0 code mid-function, detour through a
@@ -68,6 +70,16 @@ static uint32_t g_next_pid = 1;
 static int g_preempt_depth; /* >0: kernel code must not be switched */
 
 static struct task *task_find_slot(void) {
+    /* Reuse a zombie slot first (the task finished; its kernel stack
+     * and address space are reclaimed lazily), then an unused one.
+     * Without recycling, TASK_MAX (16) spawned programs would fill
+     * the table and later execs would fail. */
+    for (int i = 0; i < TASK_MAX; i++) {
+        if (g_tasks[i].state == TASK_ZOMBIE) {
+            memset(&g_tasks[i], 0, sizeof(g_tasks[i]));
+            return &g_tasks[i];
+        }
+    }
     for (int i = 0; i < TASK_MAX; i++) {
         if (g_tasks[i].state == 0) { /* unused slot */
             return &g_tasks[i];
@@ -153,7 +165,7 @@ int task_create_user(uint64_t entry, const char *name, uint64_t cr3,
      * code runs) is supervisor-only. Frames are zeroed via the HHDM
      * mapping: the C library's startup code expects a clean stack. */
     uint64_t ustack = USER_STACK_BASE;
-    uint64_t pages = STACK_SIZE / 4096;
+    uint64_t pages = USER_STACK_SIZE / 4096;
     for (uint64_t i = 0; i < pages; i++) {
         uint64_t frame = pmm_alloc_frame();
         if (frame == 0) {
@@ -188,39 +200,45 @@ int task_create_user(uint64_t entry, const char *name, uint64_t cr3,
         nargs = 16;
         nwords = nargs + 6;
     }
-    uint64_t top_frame = vmm_translate_in(cr3, ustack + STACK_SIZE - 4096);
+    uint64_t top_frame = vmm_translate_in(cr3, ustack + USER_STACK_SIZE - 4096);
     if (top_frame == 0) {
         return -1;
     }
     char *frame_base = (char *)pmm_phys_to_virt(top_frame);
-    uint64_t *init = (uint64_t *)(frame_base + 4096 - 8 * nwords);
 
-    /* Copy the argument strings at the BOTTOM of the top page,
-     * growing upward. The initial RSP sits at the array, so the
-     * first ~4 KiB of stack usage (function calls, musl startup)
-     * cannot reach the strings. They are copied through the HHDM
-     * mapping (the caller may not be in this space) but the pointers
-     * stored in the array are user virtual addresses, since the
-     * kernel heap is not readable from ring 3. */
-    char *sptr = frame_base + 64;
-    uint64_t arg_ptrs[16];
+    /* Argument strings live at the VERY TOP of the top page, growing
+     * downward; the pointer array sits below them and the initial RSP
+     * below that. The stack grows down from RSP, so it can never
+     * reach the strings - with the strings at the BOTTOM of the page
+     * (older layout) a program using more than ~4 KiB of stack
+     * silently corrupted argv. All writes go through the HHDM
+     * mapping (the caller may not be in this space); the pointers
+     * stored in the array are user virtual addresses. */
     const char *args[16];
     args[0] = name != NULL ? name : "";
     for (int i = 1; i < nargs; i++) {
         args[i] = (argv != NULL && argv[i - 1] != NULL) ? argv[i - 1] : "";
     }
+    size_t need = 8 + (size_t)nwords * 8;
     for (int i = 0; i < nargs; i++) {
-        size_t avail = (size_t)((char *)init - sptr);
-        size_t slen = strlen(args[i]);
-        if (slen + 1 > avail) {
-            slen = avail > 0 ? avail - 1 : 0;
-        }
-        memcpy(sptr, args[i], slen + 1);
-        arg_ptrs[i] = (uint64_t)(ustack + STACK_SIZE - 4096) +
-                      (uint64_t)(sptr - frame_base);
-        sptr += slen + 1;
+        need += strlen(args[i]) + 1;
+    }
+    if (need > 4096) {
+        return -1;
     }
 
+    char *sptr = frame_base + 4096;
+    uint64_t arg_ptrs[16];
+    for (int i = 0; i < nargs; i++) {
+        size_t slen = strlen(args[i]);
+        sptr -= slen + 1;
+        memcpy(sptr, args[i], slen + 1);
+        arg_ptrs[i] = (uint64_t)(ustack + USER_STACK_SIZE - 4096) +
+                      (uint64_t)(sptr - frame_base);
+    }
+
+    uint64_t *init = (uint64_t *)((uintptr_t)sptr & ~(uintptr_t)7);
+    init -= nwords;
     init[0] = (uint64_t)nargs;   /* argc */
     for (int i = 0; i < nargs; i++) {
         init[1 + i] = arg_ptrs[i];
@@ -230,7 +248,8 @@ int task_create_user(uint64_t entry, const char *name, uint64_t cr3,
     init[3 + nargs] = AT_PAGESZ;
     init[4 + nargs] = 4096;     /* page size */
     init[5 + nargs] = 0;        /* auxv terminator */
-    uint64_t ustack_rsp = ustack + STACK_SIZE - 8 * nwords;
+    uint64_t ustack_rsp = (uint64_t)(ustack + USER_STACK_SIZE - 4096) +
+                          (uint64_t)((char *)init - frame_base);
 
     t->pid = g_next_pid++;
     t->state = TASK_READY;
@@ -240,10 +259,14 @@ int task_create_user(uint64_t entry, const char *name, uint64_t cr3,
     t->kstack = (uint64_t)(uintptr_t)kstack;
     t->kstack_top = t->kstack + STACK_SIZE;
     t->ustack = ustack;
-    t->ustack_top = ustack + STACK_SIZE;
+    t->ustack_top = ustack + USER_STACK_SIZE;
     t->cr3 = cr3;
     t->fs_base = 0;
     t->mmap_cur = MMAP_CURSOR_START;
+    t->uid = 0;   /* every task starts as root (no privilege model yet) */
+    t->euid = 0;
+    t->gid = 0;
+    t->egid = 0;
 
     /* Default FPU state (hardware reset values): x87 control word
      * with all exceptions masked, empty x87 tag word, MXCSR with all
@@ -395,6 +418,10 @@ void task_exit(int status) {
     /* A foreground program (kilo) that owned the console keyboard
      * must give it back so the shell can read again. */
     kbd_input_release(g_current->pid);
+
+    /* Release the task's file descriptors: the fd table is global,
+     * so leaked fds would starve later tasks (VFS_MAX_FDS is 16). */
+    vfs_close_all(g_current->pid);
 
     struct task *next = task_next(g_current);
     if (next == g_current) {

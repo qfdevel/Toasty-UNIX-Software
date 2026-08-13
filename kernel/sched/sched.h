@@ -57,6 +57,15 @@ struct task {
      * switch (the C library stores errno and TLS in it). */
     uint64_t fs_base;
 
+    /* User identity. TUS has no privilege separation yet - every task
+     * starts as uid/gid 0 (root) - but the ids are tracked and can be
+     * queried/changed via the uid/gid syscalls, which is what doas,
+     * passwd and login use. */
+    uint32_t uid;
+    uint32_t euid;
+    uint32_t gid;
+    uint32_t egid;
+
     /* Next address for anonymous mmap allocations (see SYS_MMAP). */
     uint64_t mmap_cur;
 

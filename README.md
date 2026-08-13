@@ -7,7 +7,7 @@ built with the [Limine](https://limine-bootloader.org) bootloader. It
 targets every 64-bit machine, with a modular, clean and well-documented
 codebase.
 
-## Current features (v0.7.0)
+## Current features (v0.8.0)
 
 - Boots via Limine (BIOS and UEFI), 64-bit long mode, higher-half kernel
 - **Boot splash** - one toast per CPU, like Linux's Tux logos: the
@@ -17,9 +17,31 @@ codebase.
   filesystem (`/logo.ppm`, PPM decoded by the kernel - no embedded
   arrays), so swapping the image is a one-file change.
 - **Root filesystem image** - `rootfs.img` (ustar tar) ships inside
-  `tus.iso` as a Limine module and is mounted at boot; the user
-  programs live in `/boot` and the boot logo at `/logo.ppm`. Staging
-  dir: `rootfs/`
+  `tus.iso` as a Limine module and is mounted at boot. The directory
+  tree (`/bin`, `/dev`, `/etc`, `/tmp`) and all OS files (user
+  programs, `/etc/passwd`, `/etc/shadow`, `/etc/group`,
+  `/etc/doas.conf`, the boot logo) live in the image - no hardcoded
+  layout in the kernel.
+- **UNIX file layout** - user programs live in `/bin` without file
+  extensions (`kilo`, `grep`, `doas`...); executability comes from the
+  x permission bit (checked by the kernel on exec), and the shell
+  resolves bare command names through PATH (`kilo` runs `/bin/kilo`).
+  `ls -l` shows real permission strings (`-rwsr-xr-x`), and the image
+  build sets the SUID bit on `doas` and `passwd` (4555) exactly like
+  a real initramfs script.
+- **System tools (userspace/)** - `doas` (OpenBSD-style privilege
+  elevation: `/etc/doas.conf` rules, nopass, `-u`, `-C`, PATH lookup,
+  execve), `useradd` (full account creation into `/etc/passwd`,
+  `/etc/shadow`, `/etc/group`, home dirs, exit codes), `passwd`
+  (crypt() hashing, lock/unlock/delete/status, aging fields), `login`
+  (echo-off password prompt, shadow verification, motd), `grep`
+  (BRE/ERE regex engine, -i -v -n -c -l -w -x -E -F -e -f -m
+  -A/-B/-C), `sed` (s///, addresses, ranges, y, d, p, q, =, a/i/c,
+  hold space, -n -e -f -i -E).
+- **execve syscall** - a user program can replace itself with another
+  ELF (`SYS_EXECVE`), the mechanism behind doas and the future shell
+  replacement; plus `getuid/geteuid/setuid/getgid/setgid` and
+  `chmod`.
 - **Serial driver** - 16550 UART on COM1 (115200 8N1), debug mirror for
   all console output
 - **Framebuffer console** - 8x16 text grid over the Limine-provided
@@ -71,9 +93,9 @@ codebase.
   `sysinfo`, `reboot`, `crash`, `ls`, `cat`, `mkdir`, `touch`, `rm`,
   `uptime`, `sleep`, `fbfill`, `cd`, `pwd`, `ps`, `exec` (with args)
 - **ELF loader** - runs static (ET_EXEC) x86-64 binaries via
-  `tsh`'s `exec` command; demo programs at `/boot/hello.elf`,
-  `/boot/enforce.elf`, `/boot/musl_hello.elf`, `/boot/kilo.elf`
-  (all shipped inside `rootfs.img`)
+  `tsh`'s `exec` command or directly by name (PATH lookup); demo
+  programs at `/bin/hello`, `/bin/enforce`, `/bin/musl_hello`,
+  `/bin/kilo` (all shipped inside `rootfs.img`)
 - **Interrupt handling** - full IDT, remapped PIC, register dump on CPU
   exceptions (kernel panic, incl. CR2 on page faults)
 
@@ -89,7 +111,8 @@ TOS/
 ├── musl-out/              musl build output: headers, libc.a, crt (ignored)
 ├── rootfs/                root filesystem staging dir
 │   ├── logo.ppm           boot splash logo (PPM, read at runtime)
-│   └── boot/              user programs (built here, into rootfs.img)
+│   ├── etc/               passwd, shadow, group, doas.conf, motd, skel/
+│   └── bin/               user programs (built here, into rootfs.img)
 ├── kernel/
 │   ├── linker.ld          higher-half linker script
 │   ├── main.c             entry point, boot sequence
@@ -103,7 +126,8 @@ TOS/
 │   ├── syscall/           int $0x80 gate and dispatch
 │   ├── sched/             round-robin scheduler, FPU/TLS task state
 │   └── shell/             tsh, core commands, fs commands
-├── tests/                 test_boot.py (31 checks) + demo program sources
+├── tests/                 test_boot.py (39 checks) + demo program sources
+├── userspace/             system tools: doas, useradd, passwd, login, grep, sed
 ├── build/                 compiler output (objects, deps) (ignored)
 ├── Makefile
 └── limine.conf
@@ -136,9 +160,16 @@ cat /etc/motd
 echo hello world > /tmp/greet
 cat /tmp/greet
 ls /dev
+ls -l /bin
 fbfill 336699
 uptime
-exec /boot/hello.elf
+kilo /kilo.txt          # bare name -> /bin/kilo
+grep -i toast /etc/motd
+sed s/TUS/Toasty/ /etc/motd
+useradd -m -s /bin/tsh ahmet
+passwd ahmet
+doas useradd -m veli    # privilege elevation via /etc/doas.conf
+login ahmet
 ```
 
 Automated headless test (boots with 4 CPUs, types into the virtual
@@ -183,7 +214,7 @@ ld -m elf_x86_64 -static -e _start -Ttext 0x10000000 -o hello.elf \
     -Lmusl-out/usr/lib -lc musl-out/usr/lib/crtn.o
 ```
 
-Then `exec /boot/hello.elf` from tsh.
+Then `kilo` from tsh (or `exec /bin/kilo`).
 
 ## Backup policy
 

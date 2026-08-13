@@ -111,6 +111,15 @@ long elf_exec(const char *path, int argc, char **argv) {
         return g_elf_fd;
     }
 
+    /* UNIX rule: executability comes from the x permission bit, not
+     * from a file extension. */
+    struct vfs_node *node = vfs_lookup(path);
+    if (node == NULL || (node->mode & 0111) == 0) {
+        kprintf("exec: permission denied: %s\n", path);
+        vfs_close(g_elf_fd);
+        return -EACCES;
+    }
+
     el_ctx ctx;
     memset(&ctx, 0, sizeof(ctx));
     ctx.pread = tus_pread;
@@ -158,8 +167,190 @@ long elf_exec(const char *path, int argc, char **argv) {
         vfs_close(g_elf_fd);
         return -ENOMEM;
     }
+    /* The binary's fd is no longer needed once the task is spawned -
+     * without this close every exec leaked one fd (the table is only
+     * 16 slots) and later programs ran out of descriptors. */
+    vfs_close(g_elf_fd);
     kprintf("exec: %s started as pid %d (entry 0x%llx, ring 3, cr3 0x%llx)\n",
             path, pid, (unsigned long long)ctx.ehdr.e_entry,
             (unsigned long long)cr3);
+    return 0;
+}
+
+/* ---- execve: replace the current task's image ---- */
+
+/* User stack layout constants (mirror kernel/sched/sched.c). */
+#define EXEC_STACK_SIZE   65536
+#define EXEC_USER_STACK   0x60000000ull
+#define EXEC_AT_PAGESZ    6
+#define EXEC_MAX_ARGS     16
+
+/* Map a fresh user stack in `cr3` and lay out the SysV argument
+ * image (argc, argv pointers, envp, auxv) the way musl's crt1
+ * expects. Returns the initial RSP or 0 on failure. All writes go
+ * through the HHDM mapping (the caller may be in a different space). */
+static uint64_t exec_build_stack(uint64_t cr3, const char *name,
+                                 int argc, char **argv) {
+    uint64_t ustack = EXEC_USER_STACK;
+    for (uint64_t i = 0; i < EXEC_STACK_SIZE / 4096; i++) {
+        uint64_t frame = pmm_alloc_frame();
+        if (frame == 0) {
+            return 0;
+        }
+        memset((void *)pmm_phys_to_virt(frame), 0, 4096);
+        if (vmm_map_page_in(cr3, ustack + i * 4096, frame,
+                            VMM_PRESENT | VMM_WRITE | VMM_USER) != 0) {
+            return 0;
+        }
+    }
+
+    int nargs = argc + 1;
+    int nwords = nargs + 6;
+    if (nargs > EXEC_MAX_ARGS) {
+        nargs = EXEC_MAX_ARGS;
+        nwords = nargs + 6;
+    }
+    uint64_t top_frame = vmm_translate_in(cr3, ustack + EXEC_STACK_SIZE - 4096);
+    if (top_frame == 0) {
+        return 0;
+    }
+    char *frame_base = (char *)pmm_phys_to_virt(top_frame);
+
+    /* Argument strings at the VERY TOP of the top page, the pointer
+     * array below them, the initial RSP below that: the downward
+     * growing stack can never reach the strings (see sched.c). */
+    const char *args[EXEC_MAX_ARGS];
+    args[0] = name != NULL ? name : "";
+    for (int i = 1; i < nargs; i++) {
+        args[i] = (argv != NULL && argv[i - 1] != NULL) ? argv[i - 1] : "";
+    }
+    size_t need = 8 + (size_t)nwords * 8;
+    for (int i = 0; i < nargs; i++) {
+        need += strlen(args[i]) + 1;
+    }
+    if (need > 4096) {
+        return 0;
+    }
+
+    char *sptr = frame_base + 4096;
+    uint64_t arg_ptrs[EXEC_MAX_ARGS];
+    for (int i = 0; i < nargs; i++) {
+        size_t slen = strlen(args[i]);
+        sptr -= slen + 1;
+        memcpy(sptr, args[i], slen + 1);
+        arg_ptrs[i] = (uint64_t)(ustack + EXEC_STACK_SIZE - 4096) +
+                      (uint64_t)(sptr - frame_base);
+    }
+
+    uint64_t *init = (uint64_t *)((uintptr_t)sptr & ~(uintptr_t)7);
+    init -= nwords;
+    init[0] = (uint64_t)nargs;
+    for (int i = 0; i < nargs; i++) {
+        init[1 + i] = arg_ptrs[i];
+    }
+    init[1 + nargs] = 0;        /* argv terminator */
+    init[2 + nargs] = 0;        /* envp[0] */
+    init[3 + nargs] = EXEC_AT_PAGESZ;
+    init[4 + nargs] = 4096;     /* page size */
+    init[5 + nargs] = 0;        /* auxv terminator */
+    return (uint64_t)(ustack + EXEC_STACK_SIZE - 4096) +
+           (uint64_t)((char *)init - frame_base);
+}
+
+/* execve(path, argv): replace the calling task's program image.
+ * `path` and the `argv` strings must be kernel pointers (the syscall
+ * layer copies them out of user memory first). On success this never
+ * returns to the old image: the task's address space, user stack and
+ * the interrupt frame on its kernel stack are rewritten, so the
+ * syscall's IRETQ lands at the new entry point in ring 3.
+ *
+ * The old address space is intentionally leaked (the VMM has no
+ * space-free primitive yet); exec is not a hot path. */
+long elf_exec_current(const char *path, int argc, char **argv,
+                      uint64_t frame_rsp) {
+    struct task *cur = sched_current();
+    if (cur == NULL || path == NULL) {
+        return -EINVAL;
+    }
+
+    g_elf_fd = vfs_open(path, O_RDONLY);
+    if (g_elf_fd < 0) {
+        return g_elf_fd;
+    }
+    struct vfs_node *node = vfs_lookup(path);
+    if (node == NULL || (node->mode & 0111) == 0) {
+        vfs_close(g_elf_fd);
+        return -EACCES; /* executability comes from the x bit */
+    }
+
+    el_ctx ctx;
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.pread = tus_pread;
+    if (el_init(&ctx) != EL_OK) {
+        vfs_close(g_elf_fd);
+        return -ENOEXEC;
+    }
+
+    uint64_t cr3 = vmm_space_clone();
+    if (cr3 == 0) {
+        vfs_close(g_elf_fd);
+        return -ENOMEM;
+    }
+    ctx.userdata = (void *)(uintptr_t)cr3;
+
+    preempt_disable();
+    vmm_space_switch(cr3);
+    el_status st = el_load(&ctx, tus_alloc);
+    if (st != EL_OK) {
+        vmm_space_switch(vmm_root_cr3());
+        preempt_enable();
+        vfs_close(g_elf_fd);
+        return -ENOEXEC;
+    }
+
+    uint64_t ustack_rsp = exec_build_stack(cr3, path, argc, argv);
+    if (ustack_rsp == 0) {
+        vmm_space_switch(vmm_root_cr3());
+        preempt_enable();
+        vfs_close(g_elf_fd);
+        return -ENOMEM;
+    }
+
+    /* The new image is fully loaded: switch the task to it. The
+     * kernel half is shared, so the remaining kernel code (and the
+     * syscall epilogue) runs fine in the new space. */
+    uint64_t entry = ctx.ehdr.e_entry;
+    vfs_close(g_elf_fd);
+
+    vmm_space_switch(cr3);
+    cur->cr3 = cr3;
+    cur->ustack = EXEC_USER_STACK;
+    cur->ustack_top = EXEC_USER_STACK + EXEC_STACK_SIZE;
+    cur->fs_base = 0;          /* new program sets up its own TLS */
+    cur->mmap_cur = 0x40000000ull;
+    cur->uid = 0;              /* execve resets to root (no model yet) */
+    cur->euid = 0;
+    cur->gid = 0;
+    cur->egid = 0;
+    const char *base = path;
+    for (const char *p = path; *p != '\0'; p++) {
+        if (*p == '/') {
+            base = p + 1;
+        }
+    }
+    strncpy(cur->name, base, TASK_NAME_MAX - 1);
+    cur->name[TASK_NAME_MAX - 1] = '\0';
+
+    /* Rewrite the live interrupt frame on this kernel stack (layout:
+     * [.. 15 regs ..][rip cs rflags rsp ss], see syscall_entry). The
+     * iretq of the syscall epilogue will land in the new program. */
+    uint64_t *f = (uint64_t *)(uintptr_t)frame_rsp;
+    f[0] = entry;            /* rip */
+    f[1] = 0x1B;             /* cs  (0x18 | RPL 3) */
+    f[2] = f[2] | 0x200;     /* rflags: keep IF */
+    f[3] = ustack_rsp;       /* rsp */
+    f[4] = 0x23;             /* ss  (0x20 | RPL 3) */
+
+    preempt_enable();
     return 0;
 }

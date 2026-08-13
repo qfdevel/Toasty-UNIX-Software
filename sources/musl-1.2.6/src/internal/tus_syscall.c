@@ -39,6 +39,13 @@
 #define TUS_SYS_WRITEV  15
 #define TUS_SYS_TIME    16
 #define TUS_SYS_FTRUNCATE 17
+#define TUS_SYS_EXECVE   18
+#define TUS_SYS_CHMOD    19
+#define TUS_SYS_GETUID   20
+#define TUS_SYS_GETEUID  21
+#define TUS_SYS_SETUID   22
+#define TUS_SYS_GETGID   23
+#define TUS_SYS_SETGID   24
 
 #define TUS_ENOSYS (-38)
 #define TUS_EFAULT (-14)
@@ -121,15 +128,23 @@ long tus_syscall(long n, long a1, long a2, long a3,
     case 16:  return tus_raw(TUS_SYS_IOCTL, a1, a2, a3, 0, 0, 0);   /* ioctl */
     case 20:  return tus_raw(TUS_SYS_WRITEV, a1, a2, a3, 0, 0, 0);  /* writev */
     case 39:  return tus_raw(TUS_SYS_GETPID, 0, 0, 0, 0, 0, 0);     /* getpid */
+    case 59:  return tus_raw(TUS_SYS_EXECVE, a1, a2, a3, 0, 0, 0);  /* execve */
     case 60:  return tus_raw(TUS_SYS_EXIT, a1, 0, 0, 0, 0, 0);      /* exit */
     case 77:  return tus_raw(TUS_SYS_FTRUNCATE, a1, a2, 0, 0, 0, 0); /* ftruncate */
-    case 83:  return tus_raw(TUS_SYS_MKDIR, a1, 0, 0, 0, 0, 0);     /* mkdir */
+    case 83:  return tus_raw(TUS_SYS_MKDIR, a1, a2, 0, 0, 0, 0);    /* mkdir(path, mode) */
     case 87:  return tus_raw(TUS_SYS_UNLINK, a1, 0, 0, 0, 0, 0);    /* unlink */
+    case 90:  return tus_raw(TUS_SYS_CHMOD, a1, a2, 0, 0, 0, 0);    /* chmod */
+    case 102: return tus_raw(TUS_SYS_GETUID, 0, 0, 0, 0, 0, 0);     /* getuid */
+    case 104: return tus_raw(TUS_SYS_GETGID, 0, 0, 0, 0, 0, 0);     /* getgid */
+    case 105: return tus_raw(TUS_SYS_SETUID, a1, 0, 0, 0, 0, 0);    /* setuid */
+    case 106: return tus_raw(TUS_SYS_SETGID, a1, 0, 0, 0, 0, 0);    /* setgid */
+    case 107: return tus_raw(TUS_SYS_GETEUID, 0, 0, 0, 0, 0, 0);    /* geteuid */
+    case 108: return tus_raw(TUS_SYS_GETGID, 0, 0, 0, 0, 0, 0);    /* getegid */
     case 158: return tus_raw(TUS_SYS_ARCH_PRCTL, a1, a2, 0, 0, 0, 0); /* arch_prctl */
     case 201: return tus_raw(TUS_SYS_TIME, 0, 0, 0, 0, 0, 0);       /* time */
     case 231: return tus_raw(TUS_SYS_EXIT, a1, 0, 0, 0, 0, 0);      /* exit_group */
     case 257: return tus_raw(TUS_SYS_OPEN, a2, a3, 0, 0, 0, 0);     /* openat(dirfd, path, flags, mode) */
-    case 258: return tus_raw(TUS_SYS_MKDIR, a2, 0, 0, 0, 0, 0);     /* mkdirat(dirfd, path, mode) */
+    case 258: return tus_raw(TUS_SYS_MKDIR, a2, a3, 0, 0, 0, 0);    /* mkdirat(dirfd, path, mode) */
     case 263: return tus_raw(TUS_SYS_UNLINK, a2, 0, 0, 0, 0, 0);    /* unlinkat(dirfd, path, flags) */
 
     /* Emulated in userspace. */

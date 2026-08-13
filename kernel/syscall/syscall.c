@@ -22,6 +22,7 @@
 #include "../core/bootinfo.h"
 #include "../core/errno.h"
 #include "../drivers/pit.h"
+#include "../elf/tus_elf.h"
 #include "../mm/pmm.h"
 #include "../mm/vmm.h"
 #include "../sched/sched.h"
@@ -56,6 +57,7 @@ __attribute__((naked)) void syscall_entry(void) {
         "push %rax\n\t"
         "mov %rsp, %rdi\n\t"
         "mov 64(%rsp), %rsi\n\t"   /* CS from the interrupt frame */
+        "lea 56(%rsp), %rdx\n\t"   /* pointer to the interrupt frame */
         "call syscall_dispatch\n\t"
         "add $56, %rsp\n\t"
         "iretq\n");
@@ -96,6 +98,76 @@ static bool access_ok(bool from_user, const void *ptr, size_t len) {
 /* ------------------------------------------------------------------ */
 
 static long sys_munmap(long addr, long len);
+
+/* execve(path, argv, envp): replace the calling task with the ELF at
+ * `path`. The path and the argv strings are copied out of user memory
+ * first (we are running in the caller's address space, so a bounded
+ * direct read is fine after access_ok). Only user-mode callers may
+ * exec; the shell spawns tasks with elf_exec() instead. On success
+ * the rewritten IRETQ frame lands in the new program. */
+static long sys_execve(struct syscall_regs *r, bool from_user,
+                       uint64_t frame_rsp) {
+    if (!from_user) {
+        return -EPERM;
+    }
+    if (!access_ok(from_user, (const void *)r->rdi, 1)) {
+        return -EFAULT;
+    }
+
+    char path[256];
+    size_t i = 0;
+    const char *upath = (const char *)r->rdi;
+    while (i + 1 < sizeof(path)) {
+        char c = upath[i];
+        if (c == '\0') {
+            break;
+        }
+        path[i++] = c;
+    }
+    path[i] = '\0';
+    if (i == 0) {
+        return -ENOENT;
+    }
+
+    char *argv[17];
+    char arg_data[16][128];
+    int argc = 0;
+    char **uargv = (char **)r->rsi;
+    if (uargv != NULL) {
+        while (argc < 16) {
+            if (!access_ok(from_user, (void *)(uargv + argc),
+                           sizeof(char *))) {
+                return -EFAULT;
+            }
+            const char *s = uargv[argc];
+            if (s == NULL) {
+                break;
+            }
+            if (!access_ok(from_user, s, 1)) {
+                return -EFAULT;
+            }
+            size_t j = 0;
+            while (j + 1 < sizeof(arg_data[argc])) {
+                char c = s[j];
+                if (c == '\0') {
+                    break;
+                }
+                arg_data[argc][j++] = c;
+            }
+            arg_data[argc][j] = '\0';
+            argv[argc] = arg_data[argc];
+            argc++;
+        }
+    }
+    argv[argc] = NULL;
+
+    /* execve's argv includes the program name; elf_exec_current
+     * prepends `path` as argv[0] itself, so skip it. */
+    if (argc > 0) {
+        return elf_exec_current(path, argc - 1, &argv[1], frame_rsp);
+    }
+    return elf_exec_current(path, 0, argv, frame_rsp);
+}
 
 /* exit(status): terminate the current task and switch to the next.
  * Never returns. */
@@ -224,13 +296,14 @@ static long sys_writev(long fd, void *iov, long count, bool from_user) {
     return total;
 }
 
-long syscall_dispatch(struct syscall_regs *r, uint64_t cs) {
+long syscall_dispatch(struct syscall_regs *r, uint64_t cs, uint64_t frame_rsp) {
     bool from_user = (cs & 3) == 3;
 
     switch (r->rax) {
     case SYS_EXIT:
         return sys_exit((int)r->rdi);
-    case SYS_READ:
+    case SYS_EXECVE:
+        return sys_execve(r, from_user, frame_rsp);    case SYS_READ:
         if (!access_ok(from_user, (void *)r->rsi, (size_t)r->rdx)) {
             return -EFAULT;
         }
@@ -267,7 +340,12 @@ long syscall_dispatch(struct syscall_regs *r, uint64_t cs) {
         if (!access_ok(from_user, (const void *)r->rdi, 1)) {
             return -EFAULT;
         }
-        return vfs_mkdir((const char *)r->rdi);
+        return vfs_mkdir((const char *)r->rdi, (uint32_t)r->rsi);
+    case SYS_CHMOD:
+        if (!access_ok(from_user, (const void *)r->rdi, 1)) {
+            return -EFAULT;
+        }
+        return vfs_chmod((const char *)r->rdi, (uint32_t)r->rsi);
     case SYS_UNLINK:
         if (!access_ok(from_user, (const void *)r->rdi, 1)) {
             return -EFAULT;
@@ -290,6 +368,38 @@ long syscall_dispatch(struct syscall_regs *r, uint64_t cs) {
         return (long)(pit_uptime_ms() / 1000);
     case SYS_FTRUNCATE:
         return vfs_ftruncate((int)r->rdi, (long)r->rsi);
+    case SYS_GETUID: {
+        struct task *cur = sched_current();
+        return cur != NULL ? (long)cur->uid : 0;
+    }
+    case SYS_GETEUID: {
+        struct task *cur = sched_current();
+        return cur != NULL ? (long)cur->euid : 0;
+    }
+    case SYS_SETUID: {
+        struct task *cur = sched_current();
+        if (cur == NULL) {
+            return -EPERM;
+        }
+        /* TUS has no privilege separation: any task may change its
+         * ids (everything runs as root by default). */
+        cur->uid = (uint32_t)r->rdi;
+        cur->euid = (uint32_t)r->rdi;
+        return 0;
+    }
+    case SYS_GETGID: {
+        struct task *cur = sched_current();
+        return cur != NULL ? (long)cur->gid : 0;
+    }
+    case SYS_SETGID: {
+        struct task *cur = sched_current();
+        if (cur == NULL) {
+            return -EPERM;
+        }
+        cur->gid = (uint32_t)r->rdi;
+        cur->egid = (uint32_t)r->rdi;
+        return 0;
+    }
     default:
         return -ENOSYS;
     }

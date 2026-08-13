@@ -19,6 +19,7 @@
 #define ENOTDIR 20 /* not a directory */
 #define EISDIR  21 /* is a directory */
 #define EINVAL  22 /* invalid argument */
+#define EACCES  13 /* permission denied */
 #define ENOTTY  25 /* inappropriate ioctl for device */
 #define ENOSPC  28 /* no space left on device */
 #define ENOEXEC 8  /* exec format error */

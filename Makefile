@@ -45,11 +45,12 @@ KERNEL_OBJS := $(patsubst kernel/%.c,$(BUILD)/kernel/%.o,$(KERNEL_SRCS))
 DEPS        := $(KERNEL_OBJS:.o=.d)
 
 # Root filesystem: rootfs/ is tarred into rootfs.img (ustar format,
-# parsed by kernel/vfs/rootfs.c). The user programs are built straight
-# into rootfs/boot/, so the ISO ships exactly the files the running
-# system sees at /boot. The empty base directories (dev, tmp) are
-# created here - git does not track empty dirs - and end up in the
-# image, so the kernel does not hardcode the directory tree.
+# parsed by kernel/vfs/rootfs.c). User programs are built straight
+# into rootfs/bin/ - no file extensions, like real UNIX: executability
+# comes from the x permission bit, and the image stores the modes
+# (doas/passwd ship setuid 4555). The empty base directories (dev,
+# tmp) are created here - git does not track empty dirs - and end up
+# in the image, so the kernel does not hardcode the directory tree.
 ROOTFS_DIR   := rootfs
 ROOTFS_IMG   := rootfs.img
 ROOTFS_FILES := $(shell find $(ROOTFS_DIR) -type f 2>/dev/null)
@@ -58,11 +59,22 @@ ROOTFS_FILES := $(shell find $(ROOTFS_DIR) -type f 2>/dev/null)
 USER_CFLAGS := -m64 -ffreestanding -fno-stack-protector -fno-pic \
                -mno-red-zone -mgeneral-regs-only -O2
 USER_LDFLAGS := -m elf_x86_64 -static -e _start -Ttext 0x10000000
+MUSL_LINK := -L$(MUSL_LIB) -lc $(MUSL_LIB)/crtn.o
 
-USER_ELFS := $(ROOTFS_DIR)/boot/hello.elf \
-             $(ROOTFS_DIR)/boot/enforce.elf \
-             $(ROOTFS_DIR)/boot/musl_hello.elf \
-             $(ROOTFS_DIR)/boot/kilo.elf
+# Bare command names in /bin (the shell finds them via its PATH
+# lookup: typing `kilo` runs /bin/kilo).
+USER_ELFS := $(ROOTFS_DIR)/bin/hello \
+             $(ROOTFS_DIR)/bin/enforce \
+             $(ROOTFS_DIR)/bin/musl_hello \
+             $(ROOTFS_DIR)/bin/kilo
+
+# TUS system tools (userspace/), all linked against musl.
+USER_TOOLS := $(ROOTFS_DIR)/bin/doas \
+              $(ROOTFS_DIR)/bin/useradd \
+              $(ROOTFS_DIR)/bin/passwd \
+              $(ROOTFS_DIR)/bin/login \
+              $(ROOTFS_DIR)/bin/grep \
+              $(ROOTFS_DIR)/bin/sed
 
 .PHONY: all iso run run-smp test clean clean-musl musl
 
@@ -70,7 +82,10 @@ all: kernel.elf
 
 musl: $(MUSL_LIB)/libc.a
 
-$(MUSL_LIB)/libc.a:
+# The libc is rebuilt when the TUS ABI bridge changes - otherwise an
+# edited tus_syscall.c would silently test a stale libc.
+$(MUSL_LIB)/libc.a: sources/musl-1.2.6/src/internal/tus_syscall.c \
+                    sources/musl-1.2.6/arch/x86_64/syscall_arch.h
 	cd $(MUSL_DIR) && CC=gcc ./configure --target=x86_64-unknown-tus \
 		--disable-shared --prefix=/usr
 	$(MAKE) -C $(MUSL_DIR) -j4 AR=ar RANLIB=ranlib
@@ -86,39 +101,89 @@ $(BUILD)/kernel/%.o: kernel/%.c
 # ---- user programs (built into the rootfs staging dir) ----
 
 # Plain freestanding test programs (no libc).
-$(ROOTFS_DIR)/boot/hello.elf: tests/hello.c
-	@mkdir -p $(ROOTFS_DIR)/boot $(BUILD)/tests
+$(ROOTFS_DIR)/bin/hello: tests/hello.c
+	@mkdir -p $(ROOTFS_DIR)/bin $(BUILD)/tests
 	$(CC) $(USER_CFLAGS) -c $< -o $(BUILD)/tests/hello.o
 	$(LD) $(USER_LDFLAGS) -o $@ $(BUILD)/tests/hello.o
 
-$(ROOTFS_DIR)/boot/enforce.elf: tests/enforce.c
-	@mkdir -p $(ROOTFS_DIR)/boot $(BUILD)/tests
+$(ROOTFS_DIR)/bin/enforce: tests/enforce.c
+	@mkdir -p $(ROOTFS_DIR)/bin $(BUILD)/tests
 	$(CC) $(USER_CFLAGS) -c $< -o $(BUILD)/tests/enforce.o
 	$(LD) $(USER_LDFLAGS) -o $@ $(BUILD)/tests/enforce.o
 
 # Programs linked against the ported musl libc (crt1.o + libc.a).
-# Compiles against the musl headers (-nostdinc), like musl_hello.elf.
-$(ROOTFS_DIR)/boot/musl_hello.elf: tests/musl_hello.c $(MUSL_LIB)/libc.a
-	@mkdir -p $(ROOTFS_DIR)/boot $(BUILD)/tests
+# Compiles against the musl headers (-nostdinc), like musl_hello.
+$(ROOTFS_DIR)/bin/musl_hello: tests/musl_hello.c $(MUSL_LIB)/libc.a
+	@mkdir -p $(ROOTFS_DIR)/bin $(BUILD)/tests
 	$(CC) $(USER_CFLAGS) -nostdinc -I$(MUSL_INC) -c $< -o $(BUILD)/tests/musl_hello.o
 	$(LD) $(USER_LDFLAGS) -o $@ \
-		$(MUSL_LIB)/crt1.o $(MUSL_LIB)/crti.o $(BUILD)/tests/musl_hello.o \
-		-L$(MUSL_LIB) -lc $(MUSL_LIB)/crtn.o
+		$(MUSL_LIB)/crt1.o $(MUSL_LIB)/crti.o $(BUILD)/tests/musl_hello.o $(MUSL_LINK)
 
 # kilo: a real terminal editor, unmodified, running as a ring-3 musl
 # program (termios, TIOCGWINSZ, raw input, ANSI output - all provided
 # by the kernel, see v0.6.0).
-$(ROOTFS_DIR)/boot/kilo.elf: sources/kilo/kilo.c $(MUSL_LIB)/libc.a
-	@mkdir -p $(ROOTFS_DIR)/boot $(BUILD)/tests
+$(ROOTFS_DIR)/bin/kilo: sources/kilo/kilo.c $(MUSL_LIB)/libc.a
+	@mkdir -p $(ROOTFS_DIR)/bin $(BUILD)/tests
 	$(CC) $(USER_CFLAGS) -nostdinc -I$(MUSL_INC) -c $< -o $(BUILD)/tests/kilo.o
 	$(LD) $(USER_LDFLAGS) -o $@ \
-		$(MUSL_LIB)/crt1.o $(MUSL_LIB)/crti.o $(BUILD)/tests/kilo.o \
-		-L$(MUSL_LIB) -lc $(MUSL_LIB)/crtn.o
+		$(MUSL_LIB)/crt1.o $(MUSL_LIB)/crti.o $(BUILD)/tests/kilo.o $(MUSL_LINK)
+
+# ---- TUS system tools (userspace/) ----
+
+# doas/passwd/login use crypt() from libcrypt.a; all of them link the
+# full musl libc.
+$(ROOTFS_DIR)/bin/doas: userspace/doas.c $(MUSL_LIB)/libc.a
+	@mkdir -p $(ROOTFS_DIR)/bin $(BUILD)/userspace
+	$(CC) $(USER_CFLAGS) -nostdinc -I$(MUSL_INC) -c $< -o $(BUILD)/userspace/doas.o
+	$(LD) $(USER_LDFLAGS) -o $@ \
+		$(MUSL_LIB)/crt1.o $(MUSL_LIB)/crti.o $(BUILD)/userspace/doas.o \
+		-L$(MUSL_LIB) -lcrypt -lc $(MUSL_LIB)/crtn.o
+
+$(ROOTFS_DIR)/bin/useradd: userspace/useradd.c $(MUSL_LIB)/libc.a
+	@mkdir -p $(ROOTFS_DIR)/bin $(BUILD)/userspace
+	$(CC) $(USER_CFLAGS) -nostdinc -I$(MUSL_INC) -c $< -o $(BUILD)/userspace/useradd.o
+	$(LD) $(USER_LDFLAGS) -o $@ \
+		$(MUSL_LIB)/crt1.o $(MUSL_LIB)/crti.o $(BUILD)/userspace/useradd.o \
+		-L$(MUSL_LIB) -lcrypt -lc $(MUSL_LIB)/crtn.o
+
+$(ROOTFS_DIR)/bin/passwd: userspace/passwd.c $(MUSL_LIB)/libc.a
+	@mkdir -p $(ROOTFS_DIR)/bin $(BUILD)/userspace
+	$(CC) $(USER_CFLAGS) -nostdinc -I$(MUSL_INC) -c $< -o $(BUILD)/userspace/passwd.o
+	$(LD) $(USER_LDFLAGS) -o $@ \
+		$(MUSL_LIB)/crt1.o $(MUSL_LIB)/crti.o $(BUILD)/userspace/passwd.o \
+		-L$(MUSL_LIB) -lcrypt -lc $(MUSL_LIB)/crtn.o
+
+$(ROOTFS_DIR)/bin/login: userspace/login.c $(MUSL_LIB)/libc.a
+	@mkdir -p $(ROOTFS_DIR)/bin $(BUILD)/userspace
+	$(CC) $(USER_CFLAGS) -nostdinc -I$(MUSL_INC) -c $< -o $(BUILD)/userspace/login.o
+	$(LD) $(USER_LDFLAGS) -o $@ \
+		$(MUSL_LIB)/crt1.o $(MUSL_LIB)/crti.o $(BUILD)/userspace/login.o \
+		-L$(MUSL_LIB) -lcrypt -lc $(MUSL_LIB)/crtn.o
+
+$(ROOTFS_DIR)/bin/grep: userspace/grep.c $(MUSL_LIB)/libc.a
+	@mkdir -p $(ROOTFS_DIR)/bin $(BUILD)/userspace
+	$(CC) $(USER_CFLAGS) -nostdinc -I$(MUSL_INC) -c $< -o $(BUILD)/userspace/grep.o
+	$(LD) $(USER_LDFLAGS) -o $@ \
+		$(MUSL_LIB)/crt1.o $(MUSL_LIB)/crti.o $(BUILD)/userspace/grep.o $(MUSL_LINK)
+
+$(ROOTFS_DIR)/bin/sed: userspace/sed.c $(MUSL_LIB)/libc.a
+	@mkdir -p $(ROOTFS_DIR)/bin $(BUILD)/userspace
+	$(CC) $(USER_CFLAGS) -nostdinc -I$(MUSL_INC) -c $< -o $(BUILD)/userspace/sed.o
+	$(LD) $(USER_LDFLAGS) -o $@ \
+		$(MUSL_LIB)/crt1.o $(MUSL_LIB)/crti.o $(BUILD)/userspace/sed.o $(MUSL_LINK)
 
 # ---- rootfs image ----
 
-$(ROOTFS_IMG): $(USER_ELFS) $(ROOTFS_FILES)
-	mkdir -p $(ROOTFS_DIR)/dev $(ROOTFS_DIR)/tmp $(ROOTFS_DIR)/etc $(ROOTFS_DIR)/boot
+$(ROOTFS_IMG): $(USER_ELFS) $(USER_TOOLS) $(ROOTFS_FILES)
+	mkdir -p $(ROOTFS_DIR)/dev $(ROOTFS_DIR)/tmp $(ROOTFS_DIR)/etc $(ROOTFS_DIR)/bin
+	# SUID bits must be set on the image, exactly like a real initramfs
+	# build script: doas and passwd need root privileges (the kernel
+	# stores the modes; ls -l shows the 's' bit).
+	chmod 755 $(ROOTFS_DIR)/bin/hello $(ROOTFS_DIR)/bin/enforce \
+	          $(ROOTFS_DIR)/bin/musl_hello $(ROOTFS_DIR)/bin/kilo \
+	          $(ROOTFS_DIR)/bin/useradd $(ROOTFS_DIR)/bin/login \
+	          $(ROOTFS_DIR)/bin/grep $(ROOTFS_DIR)/bin/sed
+	chmod 4555 $(ROOTFS_DIR)/bin/doas $(ROOTFS_DIR)/bin/passwd
 	tar --format=ustar -C $(ROOTFS_DIR) -cf $@ .
 
 # Header dependency tracking: rebuild objects when the headers they
@@ -158,7 +223,7 @@ test: iso
 
 clean:
 	rm -rf $(BUILD) kernel.elf tus.iso iso_root $(ROOTFS_IMG)
-	rm -f $(ROOTFS_DIR)/boot/*.elf
+	rm -f $(ROOTFS_DIR)/bin/*
 
 # Remove the musl build too (keeps the source tree, drops obj/ lib/
 # and the installed musl-out/).

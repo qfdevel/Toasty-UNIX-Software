@@ -28,6 +28,7 @@
  * the kernel a relative path and let it resolve - our VFS is still
  * absolute-only, so the shell does the resolution). */
 static char g_cwd[128] = "/";
+static char g_oldpwd[128] = ""; /* previous directory (cd -) */
 
 /* Longest normalized path we hand to the syscall ABI. */
 #define PATH_BUF 256
@@ -125,7 +126,24 @@ static int cmd_pwd(int argc, char **argv) {
 }
 
 static int cmd_cd(int argc, char **argv) {
-    const char *target = (argc > 1) ? argv[1] : "/";
+    const char *target = "/";
+    bool print_target = false;
+
+    if (argc > 1) {
+        if (strcmp(argv[1], "-") == 0) {
+            /* cd - : go to the previous directory and print it. */
+            if (g_oldpwd[0] == '\0') {
+                kprintf("cd: no previous directory\n");
+                return 1;
+            }
+            target = g_oldpwd;
+            print_target = true;
+        } else if (strcmp(argv[1], "~") == 0) {
+            target = "/"; /* HOME; TUS has no per-user homes yet */
+        } else {
+            target = argv[1];
+        }
+    }
 
     char resolved[PATH_BUF];
     path_resolve(target, resolved, sizeof(resolved));
@@ -145,17 +163,71 @@ static int cmd_cd(int argc, char **argv) {
         return 1;
     }
 
+    strncpy(g_oldpwd, g_cwd, sizeof(g_oldpwd) - 1);
+    g_oldpwd[sizeof(g_oldpwd) - 1] = '\0';
     strncpy(g_cwd, resolved, sizeof(g_cwd) - 1);
     g_cwd[sizeof(g_cwd) - 1] = '\0';
+    if (print_target) {
+        kprintf("%s\n", resolved);
+    }
     return 0;
 }
 
 /* ---- ls ---- */
 
+/* ---- ls ---- */
+
+/* Format the permission bits the way ls -l does: -rwxr-xr-x, with
+ * 's'/'S' for setuid/setgid and 't'/'T' for the sticky bit. */
+static void mode_string(uint32_t mode, uint32_t type, char out[11]) {
+    out[0] = (type == VFS_DIR) ? 'd' : (type == VFS_DEVICE) ? 'c' : '-';
+    static const char rwx[10] = "rwxrwxrwx";
+    for (int i = 0; i < 9; i++) {
+        out[1 + i] = (mode & (0400u >> i)) ? rwx[i] : '-';
+    }
+    if (mode & 04000) {
+        out[3] = (out[3] == 'x') ? 's' : 'S';
+    }
+    if (mode & 02000) {
+        out[6] = (out[6] == 'x') ? 's' : 'S';
+    }
+    if (mode & 01000) {
+        out[9] = (out[9] == 'x') ? 't' : 'T';
+    }
+    out[10] = '\0';
+}
+
+struct ls_entry {
+    char name[VFS_NAME_MAX];
+    uint32_t type;
+    uint32_t size;
+    uint32_t mode;
+};
+
 static int cmd_ls(int argc, char **argv) {
+    bool long_fmt = false;
+    bool all = false;
+    const char *target = NULL;
+    for (int i = 1; i < argc; i++) {
+        if (argv[i][0] == '-' && argv[i][1] != '\0') {
+            for (const char *p = argv[i] + 1; *p != '\0'; p++) {
+                if (*p == 'l') {
+                    long_fmt = true;
+                } else if (*p == 'a') {
+                    all = true;
+                } else {
+                    kprintf("ls: invalid option -- '%c'\n", *p);
+                    return 1;
+                }
+            }
+        } else if (target == NULL) {
+            target = argv[i];
+        }
+    }
+
     char resolved[PATH_BUF];
-    if (argc > 1) {
-        path_resolve(argv[1], resolved, sizeof(resolved));
+    if (target != NULL) {
+        path_resolve(target, resolved, sizeof(resolved));
     } else {
         strncpy(resolved, g_cwd, sizeof(resolved) - 1);
         resolved[sizeof(resolved) - 1] = '\0';
@@ -167,18 +239,50 @@ static int cmd_ls(int argc, char **argv) {
         return 1;
     }
 
+    /* Collect and sort the entries (UNIX ls sorts by name). */
+    struct ls_entry ents[128];
+    int count = 0;
     struct vfs_dirent ent;
     long n;
-    while ((n = syscall(SYS_READDIR, fd, (long)&ent, sizeof(ent), 0, 0)) > 0) {
-        const char *kind = (ent.type == VFS_DIR) ? "dir "
-                         : (ent.type == VFS_DEVICE) ? "dev "
-                         : "file";
-        kprintf("%-16s %s %8u\n", ent.name, kind, ent.size);
+    while ((n = syscall(SYS_READDIR, fd, (long)&ent, sizeof(ent), 0, 0)) > 0
+           && count < 128) {
+        if (!all && ent.name[0] == '.') {
+            continue;
+        }
+        strncpy(ents[count].name, ent.name, VFS_NAME_MAX - 1);
+        ents[count].name[VFS_NAME_MAX - 1] = '\0';
+        ents[count].type = ent.type;
+        ents[count].size = ent.size;
+        ents[count].mode = ent.mode;
+        count++;
     }
     if (n < 0) {
         print_syscall_error("ls", n);
     }
     syscall(SYS_CLOSE, fd, 0, 0, 0, 0);
+
+    for (int i = 0; i < count; i++) {
+        for (int j = i + 1; j < count; j++) {
+            if (strcmp(ents[j].name, ents[i].name) < 0) {
+                struct ls_entry tmp = ents[i];
+                ents[i] = ents[j];
+                ents[j] = tmp;
+            }
+        }
+    }
+
+    for (int i = 0; i < count; i++) {
+        if (long_fmt) {
+            char m[11];
+            mode_string(ents[i].mode, ents[i].type, m);
+            const char *kind = (ents[i].type == VFS_DIR) ? "/"
+                             : (ents[i].type == VFS_DEVICE) ? "" : "";
+            kprintf("%s root root %8u %s%s\n", m, ents[i].size,
+                    ents[i].name, kind);
+        } else {
+            kprintf("%s\n", ents[i].name);
+        }
+    }
     return 0;
 }
 
@@ -249,13 +353,73 @@ static int cmd_echo(int argc, char **argv) {
 /* ---- mkdir / touch / rm ---- */
 
 static int cmd_mkdir(int argc, char **argv) {
-    if (argc < 2) {
-        console_write("usage: mkdir <path>\n");
+    bool parents = false;
+    bool verbose = false;
+    uint32_t mode = 0;
+    const char *target = NULL;
+
+    for (int i = 1; i < argc; i++) {
+        if (argv[i][0] == '-' && argv[i][1] != '\0' && target == NULL) {
+            for (const char *p = argv[i] + 1; *p != '\0'; p++) {
+                if (*p == 'p') {
+                    parents = true;
+                } else if (*p == 'v') {
+                    verbose = true;
+                } else if (*p == 'm') {
+                    if (i + 1 < argc) {
+                        mode = (uint32_t)strtoul(argv[++i], NULL, 8);
+                    } else {
+                        kprintf("mkdir: option requires an argument -- 'm'\n");
+                        return 1;
+                    }
+                } else {
+                    kprintf("mkdir: invalid option -- '%c'\n", *p);
+                    return 1;
+                }
+            }
+        } else if (target == NULL) {
+            target = argv[i];
+        }
+    }
+    if (target == NULL) {
+        console_write("usage: mkdir [-p] [-v] [-m mode] <directory>\n");
         return 1;
     }
+
     char resolved[PATH_BUF];
-    path_resolve(argv[1], resolved, sizeof(resolved));
-    long r = syscall(SYS_MKDIR, (long)resolved, 0, 0, 0, 0);
+    path_resolve(target, resolved, sizeof(resolved));
+
+    long r;
+    if (parents) {
+        /* Create every missing component of the path. */
+        char comp[PATH_BUF];
+        size_t len = strlen(resolved);
+        r = 0;
+        for (size_t i = 1; i <= len; i++) {
+            if (i == len || resolved[i] == '/') {
+                size_t n = i;
+                if (i == len && n > 1 && resolved[n - 1] == '/') {
+                    n--;
+                }
+                memcpy(comp, resolved, n);
+                comp[n] = '\0';
+                if (n > 1) {
+                    long rr = syscall(SYS_MKDIR, (long)comp, mode, 0, 0, 0);
+                    if (rr < 0 && rr != -17 /* EEXIST */) {
+                        r = rr;
+                        break;
+                    } else if (verbose && rr == 0) {
+                        kprintf("mkdir: created directory '%s'\n", comp);
+                    }
+                }
+            }
+        }
+    } else {
+        r = syscall(SYS_MKDIR, (long)resolved, mode, 0, 0, 0);
+        if (r == 0 && verbose) {
+            kprintf("mkdir: created directory '%s'\n", resolved);
+        }
+    }
     if (r < 0) {
         print_syscall_error("mkdir", r);
         return 1;
